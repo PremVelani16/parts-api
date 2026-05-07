@@ -1,1945 +1,936 @@
 /**
- * Electronic Parts Manufacturer Search API
- * Comprehensive database — 400+ manufacturers
- * Zero dependencies — just Node.js built-ins
+ * Electronic Parts Search API
+ * Identifies manufacturers by scraping DigiKey & Mouser first,
+ * then falls back to a local prefix database.
  *
- * Run:  node parts-api.js
- * Port: 3000  (override with PORT env var)
+ * Run: node parts-api.js
+ * No npm installs required — uses only Node.js built-ins + one optional dep for HTML parsing.
  */
 
 const http = require("http");
-const url  = require("url");
+const https = require("https");
+const url = require("url");
 
-const MANUFACTURERS = {
+const PORT = process.env.PORT || 3000;
 
-  // ── 3M ─────────────────────────────────────────────────────
-  THREEM: {
-    name: "3M Electronics", shortCode: "3M", website: "https://www.3m.com",
-    categories: ["Adhesives", "Connectors", "EMI Shielding", "Cables"],
-    prefixes: ["3M", "SJ", "8810", "8910", "1181", "1182", "1183", "1350", "1600"],
-  },
+// ─────────────────────────────────────────────
+// CORS helper
+// ─────────────────────────────────────────────
+function setCORS(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
 
-  // ── SEMICONDUCTORS & ICs ───────────────────────────────────
-  TI: {
-    name: "Texas Instruments", shortCode: "TI", website: "https://www.ti.com",
-    categories: ["ICs", "Analog", "MCUs", "Power Management"],
-    prefixes: ["TMS", "LM", "TL", "SN", "CD", "AM", "TPS", "TPA", "TCA", "TDA", "BQ", "OPA", "INA", "REF", "DAC", "ADC", "MSP", "LMR", "LMV", "LMC", "LMH", "LMT", "LMX", "LMP", "LMK", "TLV", "TLC", "TLD", "TPD", "TPL", "UCC", "UC", "DRV", "ISO"],
-  },
-  ST: {
-    name: "STMicroelectronics", shortCode: "ST", website: "https://www.st.com",
-    categories: ["MCUs", "Power", "MEMS", "Motor Control"],
-    prefixes: ["STM", "STE", "STL", "STG", "STP", "STD", "STW", "L4", "L6", "L7", "L9", "VN", "VNH", "TS", "TSB", "TSC", "TSV", "M24", "M25", "M35", "M45", "M95", "LD", "LDF", "BTA", "BTB", "Z01"],
-  },
-  NXP: {
-    name: "NXP Semiconductors", shortCode: "NXP", website: "https://www.nxp.com",
-    categories: ["MCUs", "RF", "Security", "Automotive"],
-    prefixes: ["MK", "MPC", "LPC", "PCA", "PCF", "TJA", "S32", "SE", "SC", "SA", "PTN", "MFRC", "NTAG"],
-  },
-  MICROCHIP: {
-    name: "Microchip Technology", shortCode: "MCHP", website: "https://www.microchip.com",
-    categories: ["MCUs", "Memory", "Analog", "Networking"],
-    prefixes: ["PIC32", "PIC24", "PIC18", "PIC16", "PIC12", "PIC10", "PIC", "AVR", "SAM", "ATMEGA", "ATTINY", "ATXMEGA", "AT90", "AT32", "MCP", "SST", "KSZ", "LAN", "ENC", "dsPIC", "DSPIC"],
-  },
-  INFINEON: {
-    name: "Infineon Technologies", shortCode: "IFX", website: "https://www.infineon.com",
-    categories: ["Power", "Automotive", "Security", "RF"],
-    prefixes: ["IRF", "IRL", "IRFR", "IRFS", "IRFP", "IRFB", "IPB", "IPD", "IPP", "IPI", "BSC", "BSS", "BSP", "BTN", "BTS", "TLE", "TLF", "SLB", "SLI", "SLE", "XMC", "CY", "CYPD", "CYW"],
-  },
-  RENESAS: {
-    name: "Renesas Electronics", shortCode: "REN", website: "https://www.renesas.com",
-    categories: ["MCUs", "MPUs", "Automotive", "Industrial"],
-    prefixes: ["RX", "RA", "RE", "RL", "R5F", "R7FA", "R9A", "ISL", "IDT", "HIP", "EL", "X9", "ZL", "DA1", "DA2", "DA7", "SLG"],
-  },
-  ADI: {
-    name: "Analog Devices", shortCode: "ADI", website: "https://www.analog.com",
-    categories: ["Data Converters", "Amplifiers", "RF", "Power"],
-    prefixes: ["ADSP", "ADP", "ADM", "ADG", "ADA", "ADXL", "ADXRS", "LTC", "LTM", "LT1", "LT2", "LT3", "LT4", "LT6", "LT8", "LTL", "LTP", "ADuM", "ADUM", "TMC"],
-  },
-  AD_PREFIX: {
-    name: "Analog Devices (AD-series)", shortCode: "ADI", website: "https://www.analog.com",
-    categories: ["Data Converters", "Amplifiers"],
-    prefixes: ["AD5", "AD6", "AD7", "AD8", "AD9"],
-  },
-  MAXIM: {
-    name: "Maxim Integrated (ADI)", shortCode: "MAXIM", website: "https://www.maximintegrated.com",
-    categories: ["Analog", "Power", "Interface", "Sensors"],
-    prefixes: ["MAX", "DS"],
-    note: "Acquired by Analog Devices",
-  },
-  ON: {
-    name: "onsemi (ON Semiconductor)", shortCode: "ON", website: "https://www.onsemi.com",
-    categories: ["Power", "Automotive", "Image Sensors"],
-    prefixes: ["NCP", "NCV", "NCS", "NCE", "NCT", "NB", "FAN", "FDS", "FDC", "FDD", "FDG", "FDN", "FDT", "FDV", "MBR", "BCX", "MMBT", "MMBF", "MC33", "MC34", "MC78", "MC79"],
-  },
-  NORDIC: {
-    name: "Nordic Semiconductor", shortCode: "NORDIC", website: "https://www.nordicsemi.com",
-    categories: ["BLE", "Zigbee", "UWB", "WiFi"],
-    prefixes: ["NRF52", "NRF53", "NRF91", "NRF70", "NRF24", "nRF"],
-  },
-  ESPRESSIF: {
-    name: "Espressif Systems", shortCode: "ESP", website: "https://www.espressif.com",
-    categories: ["WiFi", "Bluetooth", "IoT MCUs"],
-    prefixes: ["ESP32", "ESP8266", "ESP8285", "ESP-"],
-  },
-  BROADCOM: {
-    name: "Broadcom Inc.", shortCode: "AVGO", website: "https://www.broadcom.com",
-    categories: ["Networking", "Storage", "Wireless", "Optocouplers"],
-    prefixes: ["BCM", "ACPL", "HCPL", "AFBR", "MGA", "BRCM", "AFCT"],
-  },
-  SILICON_LABS: {
-    name: "Silicon Laboratories", shortCode: "SLAB", website: "https://www.silabs.com",
-    categories: ["MCUs", "Wireless", "Timing", "IoT"],
-    prefixes: ["EFM32", "EFM8", "EFR32", "SI86", "SI84", "SI82", "CP21", "CP22", "C8051"],
-  },
-  MONOLITHIC: {
-    name: "Monolithic Power Systems", shortCode: "MPS", website: "https://www.monolithicpower.com",
-    categories: ["Power Management", "LED Drivers", "Motor Drivers"],
-    prefixes: ["MP", "MPQ", "MPF", "MPM", "MPZ"],
-  },
-  SEMTECH: {
-    name: "Semtech Corporation", shortCode: "SMTC", website: "https://www.semtech.com",
-    categories: ["LoRa", "Protection ICs", "Timing", "Wireless"],
-    prefixes: ["SX12", "SX13", "SX14", "SX15", "SX16", "SX17", "RClamp", "RCLAMP"],
-  },
-  RICHTEK: {
-    name: "Richtek Technology", shortCode: "RT", website: "https://www.richtek.com",
-    categories: ["Power Management", "LED Drivers"],
-    prefixes: ["RT96", "RT97", "RT98", "RT84", "RT85", "RT86", "RT70", "RT71", "RT72", "RT73", "RT74", "RT75"],
-  },
-  TOREX: {
-    name: "Torex Semiconductor", shortCode: "TRX", website: "https://www.torexsemi.com",
-    categories: ["LDO", "DC-DC", "Voltage Detectors"],
-    prefixes: ["XC6", "XC9", "XC2", "XC3", "XC4", "XC5"],
-  },
-  ROHM: {
-    name: "ROHM Semiconductor", shortCode: "ROHM", website: "https://www.rohm.com",
-    categories: ["Power ICs", "Diodes", "MOSFETs", "Sensors"],
-    prefixes: ["BD", "BA", "BH", "BM", "BR", "BU", "BV", "BW", "RB", "RF", "RN", "RP", "RQ", "RR", "RV", "RZ", "SCS", "SCT"],
-  },
-  DIODES_INC: {
-    name: "Diodes Incorporated", shortCode: "DI", website: "https://www.diodes.com",
-    categories: ["Diodes", "MOSFETs", "Power", "Logic"],
-    prefixes: ["ZXMN", "ZXMP", "ZXTN", "ZXTP", "DMN", "DMP", "DTC", "DTA", "DTB", "AP", "AL", "AZ", "PAM", "PI"],
-  },
-  NEXPERIA: {
-    name: "Nexperia", shortCode: "NEX", website: "https://www.nexperia.com",
-    categories: ["Discretes", "Logic", "MOSFETs", "ESD"],
-    prefixes: ["74AHC", "74HC", "74HCT", "74LVC", "74LVCH", "74AUP", "BAS", "BAT", "BAV", "BAW", "BAP", "BGA", "BUK", "PMV", "PMBT", "PMBF"],
-  },
-  LITTELFUSE: {
-    name: "Littelfuse Inc.", shortCode: "LF", website: "https://www.littelfuse.com",
-    categories: ["TVS Diodes", "Fuses", "MOSFETs", "Protection"],
-    prefixes: ["SMAJ", "SMBJ", "SMCJ", "P6KE", "P6SMB", "1.5KE", "TVSA", "TVSB", "TVSC", "5KP", "IXFN", "IXFK", "IXFH", "IXFR", "IXFT", "IXGF", "IXGH"],
-  },
-  MCC: {
-    name: "MCC (Micro Commercial Components)", shortCode: "MCC", website: "https://www.mccsemi.com",
-    categories: ["Diodes", "Transistors", "MOSFETs", "TVS"],
-    prefixes: ["MCSH", "MCSM", "MCSB", "MCS"],
-  },
-  TAIWAN_SEMI: {
-    name: "Taiwan Semiconductor", shortCode: "TSC", website: "https://www.taiwansemi.com",
-    categories: ["Diodes", "Transistors", "Rectifiers", "TVS"],
-    prefixes: ["TSM", "TSP", "TSS"],
-  },
-  MICROSEMI: {
-    name: "Microsemi (Microchip)", shortCode: "MSCC", website: "https://www.microsemi.com",
-    categories: ["Power Semiconductors", "RF", "Space Grade"],
-    prefixes: ["APT", "APTGT", "JANTX", "JANTXV"],
-    note: "Acquired by Microchip",
-  },
-  IXYS: {
-    name: "IXYS (Littelfuse)", shortCode: "IXYS", website: "https://www.littelfuse.com",
-    categories: ["Power MOSFETs", "IGBTs", "Thyristors"],
-    prefixes: ["IXFB", "IXFP", "IXFA", "IXGK", "IXGN", "IXGP", "IXGQ"],
-    note: "Acquired by Littelfuse",
-  },
-  CENTRAL_SEMI: {
-    name: "Central Semiconductor", shortCode: "CSC", website: "https://www.centralsemi.com",
-    categories: ["Transistors", "Diodes", "MOSFETs"],
-    prefixes: ["CMBT", "CMBF", "CMHZ", "CMSH", "CMSZ", "CMDSH"],
-  },
-  FAIRCHILD: {
-    name: "Fairchild Semiconductor (onsemi)", shortCode: "FSC", website: "https://www.onsemi.com",
-    categories: ["MOSFETs", "IGBTs", "Logic", "Discretes"],
-    prefixes: ["FQP", "FQD", "FQI", "FQL", "FQU", "FQB", "FQN", "FDW", "FDB", "BSS"],
-    note: "Acquired by onsemi",
-  },
-  ALPHA_OMEGA: {
-    name: "Alpha & Omega Semiconductor", shortCode: "AOS", website: "https://www.aosmd.com",
-    categories: ["MOSFETs", "Power ICs", "ESD"],
-    prefixes: ["AON", "AOP", "AOD", "AOR", "AOZ", "AOB", "AOL", "AOW", "AOF", "AOS"],
-  },
-  POWER_INT: {
-    name: "Power Integrations", shortCode: "POWI", website: "https://www.power.com",
-    categories: ["AC-DC Converters", "Gate Drivers"],
-    prefixes: ["TOP", "LNK", "DPA", "HiperPFS", "HiperLCS", "TNY", "EcoSmart"],
-  },
-  UNITRODE: {
-    name: "Unitrode (Texas Instruments)", shortCode: "UC", website: "https://www.ti.com",
-    categories: ["PWM Controllers", "Power Management"],
-    prefixes: ["UC1", "UC2", "UC3"],
-    note: "Acquired by Texas Instruments",
-  },
-  INTERNATIONAL_RECT: {
-    name: "International Rectifier (Infineon)", shortCode: "IR", website: "https://www.infineon.com",
-    categories: ["MOSFETs", "IGBTs", "Gate Drivers"],
-    prefixes: ["IRGB", "IRGP", "IRGR", "IRGS", "IRGT", "IRGU", "IRFSL", "IRFST", "IRFSU"],
-    note: "Acquired by Infineon",
-  },
-  FREESCALE: {
-    name: "Freescale Semiconductor (NXP)", shortCode: "FSL", website: "https://www.nxp.com",
-    categories: ["MCUs", "MPUs", "Automotive"],
-    prefixes: ["MK2", "MK3", "MK4", "MK5", "MK6", "MK7", "MPC5", "MPC8"],
-    note: "Acquired by NXP",
-  },
-  LATTICE: {
-    name: "Lattice Semiconductor", shortCode: "LSCC", website: "https://www.latticesemi.com",
-    categories: ["FPGAs", "CPLDs", "Programmable Logic"],
-    prefixes: ["ICE40", "ECP5", "MachXO", "LCMX", "LFEC", "LFSC", "LPTM", "iCE"],
-  },
-  XILINX: {
-    name: "Xilinx (AMD)", shortCode: "XLNX", website: "https://www.xilinx.com",
-    categories: ["FPGAs", "SoCs", "Programmable Logic"],
-    prefixes: ["XC7", "XC6", "XC5", "XC4", "XC3", "XC2", "XCKU", "XCVU", "XCZU", "XCZUEV", "XCAU"],
-    note: "Acquired by AMD",
-  },
-  AMD: {
-    name: "AMD (Advanced Micro Devices)", shortCode: "AMD", website: "https://www.amd.com",
-    categories: ["CPUs", "GPUs", "FPGAs"],
-    prefixes: ["AM4", "AM5", "EPYC", "Ryzen", "Radeon"],
-  },
-  INTEL: {
-    name: "Intel Corporation", shortCode: "INTC", website: "https://www.intel.com",
-    categories: ["CPUs", "FPGAs", "Networking"],
-    prefixes: ["FPGA", "Cyclone", "Stratix", "Arria", "Core i", "Xeon"],
-  },
-  ZILOG: {
-    name: "Zilog (Littelfuse)", shortCode: "ZLG", website: "https://www.zilog.com",
-    categories: ["MCUs", "Z80"],
-    prefixes: ["Z80", "Z8F", "Z8L", "Z16F", "Z32F", "EZ80", "ZNEO"],
-    note: "Acquired by Littelfuse",
-  },
-  WINBOND: {
-    name: "Winbond Electronics", shortCode: "WB", website: "https://www.winbond.com",
-    categories: ["Flash Memory", "SRAM", "DRAM"],
-    prefixes: ["W25", "W27", "W29", "W74", "W78", "W83", "W9"],
-  },
-  ISSI: {
-    name: "ISSI (Integrated Silicon Solution)", shortCode: "ISSI", website: "https://www.issi.com",
-    categories: ["SRAM", "DRAM", "Flash", "LED Drivers"],
-    prefixes: ["IS25", "IS62", "IS61", "IS42", "IS43", "IS45", "IS66", "IS31"],
-  },
-  MACRONIX: {
-    name: "Macronix International", shortCode: "MX", website: "https://www.macronix.com",
-    categories: ["NOR Flash", "NAND Flash"],
-    prefixes: ["MX25", "MX66", "MX29", "MX30"],
-  },
-  MICRON: {
-    name: "Micron Technology", shortCode: "MU", website: "https://www.micron.com",
-    categories: ["DRAM", "Flash", "SSDs"],
-    prefixes: ["MT4", "MT8", "MT16", "MT18", "MT25", "MT29", "MT40", "MT41", "MT47", "MT48", "MT52", "MT53"],
-  },
-  CYPRESS_MEM: {
-    name: "Cypress (Infineon)", shortCode: "CY", website: "https://www.infineon.com",
-    categories: ["SRAM", "F-RAM", "nvSRAM", "USB"],
-    prefixes: ["CY62", "CY7C", "CY14", "FM24", "FM25", "CY15"],
-    note: "Acquired by Infineon",
-  },
-  ALLIANCE_MEM: {
-    name: "Alliance Memory", shortCode: "ALM", website: "https://www.alliancememory.com",
-    categories: ["SRAM", "DRAM", "Flash"],
-    prefixes: ["AS6C", "AS7C", "AS4C", "AS5C"],
-  },
-  ADESTO: {
-    name: "Adesto Technologies (Renesas)", shortCode: "ADST", website: "https://www.renesas.com",
-    categories: ["Flash Memory", "EEPROM"],
-    prefixes: ["AT45", "AT25", "RM24", "RM25"],
-    note: "Acquired by Renesas",
-  },
-  ATMEL: {
-    name: "Atmel (Microchip)", shortCode: "ATM", website: "https://www.microchip.com",
-    categories: ["MCUs", "Security ICs", "Memory"],
-    prefixes: ["ATSHA", "ATECC", "AT88", "AT24", "AT93", "AT25D"],
-    note: "Acquired by Microchip",
-  },
-  EVERSPIN: {
-    name: "Everspin Technologies", shortCode: "MRAM", website: "https://www.everspin.com",
-    categories: ["MRAM", "Non-volatile Memory"],
-    prefixes: ["MR0", "MR1", "MR2", "MR4", "EMR", "EV"],
-  },
-  MICREL: {
-    name: "Micrel (Microchip)", shortCode: "MIC", website: "https://www.microchip.com",
-    categories: ["Analog", "Ethernet", "Timing"],
-    prefixes: ["MIC28", "MIC29", "MIC37", "MIC39", "MIC4", "MIC5", "MIC6", "MIC7", "KSZ", "SY"],
-    note: "Acquired by Microchip",
-  },
-  SIPEX: {
-    name: "Sipex Corporation (MaxLinear)", shortCode: "SPX", website: "https://www.maxlinear.com",
-    categories: ["Analog ICs", "RS-232/485"],
-    prefixes: ["SP30", "SP48", "SP49", "SPX"],
-    note: "Acquired by MaxLinear",
-  },
-  EXAR: {
-    name: "Exar Corporation (MaxLinear)", shortCode: "EXAR", website: "https://www.maxlinear.com",
-    categories: ["RS-232", "RS-485", "UART", "Power"],
-    prefixes: ["XR", "XRA", "SP33", "SP34", "SP35"],
-    note: "Acquired by MaxLinear",
-  },
-  SMSC: {
-    name: "SMSC / Standard Microsystems (Microchip)", shortCode: "SMSC", website: "https://www.microchip.com",
-    categories: ["USB", "Ethernet", "CAN"],
-    prefixes: ["LAN7", "LAN8", "LAN9", "USB23", "USB32", "KSZ"],
-    note: "Acquired by Microchip",
-  },
-  FTDI: {
-    name: "FTDI (Future Technology Devices)", shortCode: "FTDI", website: "https://www.ftdichip.com",
-    categories: ["USB-to-UART", "USB ICs"],
-    prefixes: ["FT232", "FT230", "FT234", "FT240", "FT245", "FT260", "FT312", "FT600", "FT601"],
-  },
-  WCH: {
-    name: "WCH (Nanjing Qinheng)", shortCode: "WCH", website: "https://www.wch.cn",
-    categories: ["USB ICs", "MCUs"],
-    prefixes: ["CH340", "CH341", "CH343", "CH344", "CH347", "CH32"],
-  },
-  WIZNET: {
-    name: "WIZnet", shortCode: "WIZ", website: "https://www.wiznet.io",
-    categories: ["Ethernet ICs", "TCP/IP Offload"],
-    prefixes: ["W5500", "W5300", "W5200", "W5100", "W6100", "WIZ"],
-  },
-  QUALCOMM: {
-    name: "Qualcomm / Atheros", shortCode: "QCOM", website: "https://www.qualcomm.com",
-    categories: ["WiFi", "Cellular", "Bluetooth"],
-    prefixes: ["QCA", "AR93", "AR92", "AR91", "AR81", "IPQ", "MDM", "MSM", "SDM"],
-  },
-  QUECTEL: {
-    name: "Quectel Wireless", shortCode: "QCT", website: "https://www.quectel.com",
-    categories: ["Cellular Modules", "GNSS", "WiFi Modules"],
-    prefixes: ["EC2", "EC4", "EC6", "EC8", "BG9", "BG7", "MC6", "MC8", "RM5", "RM4", "SC2"],
-  },
-  SIMCOM: {
-    name: "SIMCom Wireless", shortCode: "SIM", website: "https://www.simcom.com",
-    categories: ["Cellular Modules", "GPS"],
-    prefixes: ["SIM7", "SIM8", "SIM9", "SIM5", "SIM3", "SIM2", "SIM1"],
-  },
-  UBLOX: {
-    name: "u-blox", shortCode: "UBX", website: "https://www.u-blox.com",
-    categories: ["GNSS", "Cellular", "WiFi", "Bluetooth"],
-    prefixes: ["NEO", "MAX", "ZED", "SAM", "EVA", "LEA", "ANN", "UBX", "SARA", "LARA", "LEXI", "NORA", "NINA"],
-  },
-  MARVELL: {
-    name: "Marvell Technology", shortCode: "MRVL", website: "https://www.marvell.com",
-    categories: ["Networking", "Storage", "Processors"],
-    prefixes: ["MV", "88E", "88F", "88W", "88Q", "88X", "88H"],
-  },
-  QORVO: {
-    name: "Qorvo", shortCode: "QRV", website: "https://www.qorvo.com",
-    categories: ["RF Amplifiers", "Filters", "Switches"],
-    prefixes: ["RF", "QPF", "QPD", "QPB", "QPA", "TQP", "TQM", "TQF", "RFFM"],
-  },
-  SKYWORKS: {
-    name: "Skyworks Solutions", shortCode: "SKY", website: "https://www.skyworksinc.com",
-    categories: ["RF ICs", "Amplifiers", "Switches", "Filters"],
-    prefixes: ["SKY", "SE2", "SE5", "SFE", "SGL", "SHF", "SID"],
-  },
-  EM_MICRO: {
-    name: "EM Microelectronic-Marin", shortCode: "EM", website: "https://www.emmicroelectronic.com",
-    categories: ["Ultra-Low Power ICs", "RFID", "Sensors"],
-    prefixes: ["EM3", "EM4", "EM6", "EM9", "EM23", "EM24", "EM35", "EM38"],
-  },
-  MICRONAS: {
-    name: "Micronas (TDK)", shortCode: "MIC", website: "https://www.micronas.com",
-    categories: ["Hall Sensors", "Motor Controllers"],
-    prefixes: ["HAL", "HAS", "HAB", "HAF"],
-    note: "Part of TDK",
-  },
-  SG_MICRO: {
-    name: "SG Micro Corp", shortCode: "SGM", website: "https://www.sg-micro.com",
-    categories: ["Power Management", "Op-Amps", "Logic"],
-    prefixes: ["SGM", "SGM2", "SGM3", "SGM6", "SGM8"],
-  },
-  NOVOSENSE: {
-    name: "Novosense Microelectronics", shortCode: "NS", website: "https://www.novosns.com",
-    categories: ["Sensors", "Isolation ICs", "CAN"],
-    prefixes: ["NSi", "NSm", "NSe"],
-  },
-  SITIME: {
-    name: "SiTime Corporation", shortCode: "SIT", website: "https://www.sitime.com",
-    categories: ["MEMS Oscillators", "TCXOs", "OCXOs"],
-    prefixes: ["SIT1", "SIT2", "SIT3", "SIT5", "SIT8", "SIT9"],
-  },
-  BURR_BROWN: {
-    name: "Burr-Brown (Texas Instruments)", shortCode: "BB", website: "https://www.ti.com",
-    categories: ["Op-Amps", "DACs", "ADCs"],
-    prefixes: ["OPA", "PCM", "PGA", "INA"],
-    note: "Acquired by Texas Instruments",
-  },
-  HARRIS: {
-    name: "Harris Semiconductor (Intersil/Renesas)", shortCode: "HRS", website: "https://www.renesas.com",
-    categories: ["Linear ICs", "Power"],
-    prefixes: ["HA", "HC", "HI", "HV", "HFA", "HI5"],
-    note: "Now part of Renesas",
-  },
-  NSC: {
-    name: "National Semiconductor (Texas Instruments)", shortCode: "NSC", website: "https://www.ti.com",
-    categories: ["Analog", "Logic", "Power"],
-    prefixes: ["LM3", "LM4", "LM5", "LM6", "LM7", "LM8", "LM9", "LMD", "LP"],
-    note: "Acquired by Texas Instruments",
-  },
-  DALLAS: {
-    name: "Dallas Semiconductor (Maxim/ADI)", shortCode: "DS", website: "https://www.analog.com",
-    categories: ["RTC", "1-Wire", "Memory"],
-    prefixes: ["DS1", "DS2", "DS3", "DS4", "DS7"],
-    note: "Acquired by Maxim, now ADI",
-  },
-  SUPERTEX: {
-    name: "Supertex (Microchip)", shortCode: "STX", website: "https://www.microchip.com",
-    categories: ["HV MOSFETs", "LED Drivers", "Ultrasound"],
-    prefixes: ["HV", "TC6", "TC7", "TC9", "MD14"],
-    note: "Acquired by Microchip",
-  },
-  XICOR: {
-    name: "Xicor (Intersil/Renesas)", shortCode: "XIC", website: "https://www.renesas.com",
-    categories: ["EEPROM", "Potentiometers"],
-    prefixes: ["X92", "X93", "X94", "X95", "X96", "X97", "X98"],
-    note: "Acquired by Intersil, now Renesas",
-  },
-  RAMTRON: {
-    name: "Ramtron (Cypress/Infineon)", shortCode: "RAM", website: "https://www.infineon.com",
-    categories: ["F-RAM", "Non-volatile Memory"],
-    prefixes: ["FM25", "FM22", "VRS"],
-    note: "Acquired by Cypress, now Infineon",
-  },
+// ─────────────────────────────────────────────
+// Generic HTTPS fetch (returns body string)
+// ─────────────────────────────────────────────
+function fetchUrl(targetUrl, options = {}) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(targetUrl);
+    const reqOptions = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        Connection: "keep-alive",
+        ...(options.headers || {}),
+      },
+      timeout: 12000,
+    };
 
-  // ── PASSIVE COMPONENTS ─────────────────────────────────────
-  MURATA: {
-    name: "Murata Manufacturing", shortCode: "MUR", website: "https://www.murata.com",
-    categories: ["Capacitors", "Inductors", "Filters", "Sensors"],
-    prefixes: ["GRM", "GCM", "GCJ", "GCD", "LQM", "LQH", "LQW", "LQG", "LQP", "BLM", "BLA", "BLE", "BLJ", "BLK", "NFM", "NFA", "DFE", "CSTCE", "CSTCR", "SFECF"],
-  },
-  TDK: {
-    name: "TDK Corporation", shortCode: "TDK", website: "https://www.tdk.com",
-    categories: ["Inductors", "Capacitors", "Sensors", "Magnetics"],
-    prefixes: ["C3225", "C2012", "C1608", "MLZ", "MLG", "MLP", "SLF", "SLR", "SPM", "B82", "B57", "B58", "B59", "EPCOS", "B3292", "B3251"],
-  },
-  YAGEO: {
-    name: "Yageo Corporation", shortCode: "YAG", website: "https://www.yageo.com",
-    categories: ["Resistors", "Capacitors", "Inductors"],
-    prefixes: ["RC0", "RC1", "RC2", "AC0", "AC1", "CC0", "CC1", "TC0", "TC1", "PE0", "RT0", "RL0", "FMP", "FPF", "SQP"],
-  },
-  VISHAY: {
-    name: "Vishay Intertechnology", shortCode: "VSH", website: "https://www.vishay.com",
-    categories: ["Resistors", "Capacitors", "Diodes", "Optocouplers"],
-    prefixes: ["CRCW", "WSL", "WSLP", "TNPW", "DALE", "VS", "VO", "IL", "SFH", "BYV", "BYW", "BYT", "BZX", "BZT", "UF", "GS", "MBRS", "MBRB", "BAT4", "TSOP", "TCRT", "CNY"],
-  },
-  PANASONIC: {
-    name: "Panasonic", shortCode: "PAN", website: "https://industry.panasonic.com",
-    categories: ["Capacitors", "Resistors", "Inductors", "Relays"],
-    prefixes: ["ERJ", "ECA", "ECQ", "EEE", "EEH", "EEU", "EEV", "EEW", "EEF", "ECW", "ECS", "ELJ", "ELL", "AGQ", "ALQ", "DS", "TX", "TQ", "EVQ", "ESE"],
-  },
-  SAMSUNG_EM: {
-    name: "Samsung Electro-Mechanics", shortCode: "SEMCO", website: "https://www.samsungsem.com",
-    categories: ["MLCCs", "Inductors", "PCBs"],
-    prefixes: ["CL0", "CL1", "CL2", "CL3", "CL4", "CL5", "CI2", "CI3", "CM3", "KLMBG"],
-  },
-  KOA: {
-    name: "KOA Speer Electronics", shortCode: "KOA", website: "https://www.koaspeer.com",
-    categories: ["Resistors", "Sensors"],
-    prefixes: ["RK73", "RN73", "SG73", "TK73", "MF1", "MF2", "SR73", "WU73", "UR73"],
-  },
-  BOURNS: {
-    name: "Bourns Inc.", shortCode: "BRN", website: "https://www.bourns.com",
-    categories: ["Resistors", "Inductors", "Potentiometers", "TVS", "Fuses"],
-    prefixes: ["CR", "CRL", "CAT", "CAY", "CAZ", "SRF", "SRR", "SRU", "SRB", "SRC", "SRD", "SM", "3296", "3386", "3590", "CDNBS", "CDSOD", "CG0", "CG1", "MF-R", "MF-S"],
-  },
-  SUSUMU: {
-    name: "Susumu Co.", shortCode: "SUS", website: "https://www.susumu.co.jp",
-    categories: ["Thin Film Resistors"],
-    prefixes: ["RG", "RR", "PRL", "PHC"],
-  },
-  STACKPOLE: {
-    name: "Stackpole Electronics", shortCode: "SEI", website: "https://www.seielect.com",
-    categories: ["Resistors"],
-    prefixes: ["RMCF", "RNCP", "RMCP", "CSR", "CSRN", "HPSC", "HVCB"],
-  },
-  OHMITE: {
-    name: "Ohmite Manufacturing", shortCode: "OHM", website: "https://www.ohmite.com",
-    categories: ["Power Resistors", "Wirewound"],
-    prefixes: ["OX", "OY", "RW"],
-  },
-  WELWYN: {
-    name: "Welwyn Components (TT Electronics)", shortCode: "WEL", website: "https://www.ttelectronics.com",
-    categories: ["Resistors", "Sensors"],
-    prefixes: ["WA", "WC", "WH", "SM", "W21"],
-  },
-  RIEDON: {
-    name: "Riedon Inc.", shortCode: "RID", website: "https://www.riedon.com",
-    categories: ["Power Resistors", "Shunts"],
-    prefixes: ["HS", "HB", "FW", "HTE", "UB", "ULT", "USF"],
-  },
-  ROYALOHM: {
-    name: "Royal Ohm", shortCode: "ROH", website: "https://www.royalohm.com",
-    categories: ["Resistors"],
-    prefixes: ["WR", "PR", "CR", "MF"],
-  },
-  WALSIN: {
-    name: "Walsin Technology", shortCode: "WTS", website: "https://www.walsin.com",
-    categories: ["Resistors", "Capacitors", "Inductors"],
-    prefixes: ["WR", "WC", "WI"],
-  },
-  NIC_COMP: {
-    name: "NIC Components Corp", shortCode: "NIC", website: "https://www.niccomp.com",
-    categories: ["Resistors", "Capacitors", "Inductors"],
-    prefixes: ["NRSF", "NRSE", "NRSD", "NCR", "NMC", "NML", "NICS"],
-  },
-  RADIOHM: {
-    name: "Radiohm", shortCode: "RAD", website: "https://www.radiohm.com",
-    categories: ["Resistors", "Potentiometers"],
-    prefixes: ["CA", "CO", "CP", "CR", "JK"],
-  },
-  VENKEL: {
-    name: "Venkel Ltd.", shortCode: "VNK", website: "https://www.venkel.com",
-    categories: ["Resistors", "Capacitors", "Inductors"],
-    prefixes: ["CR", "CA", "CD", "CI", "CH"],
-  },
-  IRC: {
-    name: "IRC / TT Electronics", shortCode: "IRC", website: "https://www.ttelectronics.com",
-    categories: ["Resistors", "Sensors"],
-    prefixes: ["IRC", "LRC", "OAR", "PWR"],
-  },
+    const req = https.request(reqOptions, (res) => {
+      // Follow redirects (up to 5)
+      if (
+        res.statusCode >= 300 &&
+        res.statusCode < 400 &&
+        res.headers.location
+      ) {
+        const redirectUrl = res.headers.location.startsWith("http")
+          ? res.headers.location
+          : `https://${parsedUrl.hostname}${res.headers.location}`;
+        return fetchUrl(redirectUrl, options)
+          .then(resolve)
+          .catch(reject);
+      }
 
-  // ── CAPACITORS ─────────────────────────────────────────────
-  KEMET: {
-    name: "KEMET Electronics", shortCode: "KEM", website: "https://www.kemet.com",
-    categories: ["Capacitors", "EMI Filters", "Inductors"],
-    prefixes: ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "PHE", "ESR", "ESD", "ALS", "A700", "A750", "A760", "FK", "FKS", "FKP", "MKP", "R82", "R46", "R76"],
-  },
-  TAIYO_YUDEN: {
-    name: "Taiyo Yuden", shortCode: "TY", website: "https://www.ty-top.com",
-    categories: ["MLCCs", "Inductors", "Bluetooth Modules"],
-    prefixes: ["UMK", "UMJ", "UMZ", "TMK", "EMK", "JMK", "LMK", "HMK", "PMK", "NMK", "CMK", "AMK", "BMK", "DMK", "EYGA", "BWMDA"],
-  },
-  AVX: {
-    name: "Kyocera AVX", shortCode: "AVX", website: "https://www.kyocera-avx.com",
-    categories: ["Capacitors", "Connectors", "Filters"],
-    prefixes: ["AHA", "SR", "TAJ", "TPS", "TPSD", "TPSB", "TPSA", "TPSC", "TCJ", "TCN", "TPC", "SQCB", "SQCS", "SQCZ"],
-  },
-  NICHICON: {
-    name: "Nichicon Corporation", shortCode: "NCH", website: "https://www.nichicon.co.jp",
-    categories: ["Electrolytic Capacitors", "Film Capacitors"],
-    prefixes: ["UCA", "UCB", "UCG", "UCJ", "UCK", "UCL", "UCM", "UCN", "UCO", "UCP", "UCQ", "UCR", "UCS", "UCT", "UCU", "UCV", "UHE", "UHW", "UHB", "UPL", "UPW"],
-  },
-  RUBYCON: {
-    name: "Rubycon Corporation", shortCode: "RBY", website: "https://www.rubycon.co.jp",
-    categories: ["Electrolytic Capacitors"],
-    prefixes: ["ZLH", "ZLJ", "ZL", "MBZ", "MCZ", "MDZ", "MFZ", "MXZ", "YXF", "YXG", "PX", "PXF", "VXR"],
-  },
-  NIPPON_CHEMI_CON: {
-    name: "Nippon Chemi-Con (United Chemi-Con)", shortCode: "NCC", website: "https://www.chemi-con.co.jp",
-    categories: ["Electrolytic Capacitors", "Inductors", "Varistors"],
-    prefixes: ["EGPD", "EGPA", "EGPB", "EGPC", "EGPE", "EGPF", "EGPH", "EGPJ", "EGPK", "EGPL", "TND", "LDFX", "LDFW", "LKKA", "SME", "SMF", "SMG"],
-  },
-  ELNA: {
-    name: "Elna Co.", shortCode: "ELNA", website: "https://www.elna.co.jp",
-    categories: ["Electrolytic Capacitors", "Film Capacitors"],
-    prefixes: ["RJ", "RA", "RC", "RE", "RF", "RG", "RJE", "RHE", "RVE", "RVR", "RVZ"],
-  },
-  LELON: {
-    name: "Lelon Electronics", shortCode: "LEL", website: "https://www.lelon.com.tw",
-    categories: ["Electrolytic Capacitors"],
-    prefixes: ["REA", "REC", "REH", "REJ", "REL", "REM", "REN", "REP", "REQ", "RER", "RES", "RET"],
-  },
-  SAMWHA: {
-    name: "Samwha Capacitor", shortCode: "SWH", website: "https://www.samwha.com",
-    categories: ["Electrolytic Capacitors"],
-    prefixes: ["CA", "CB", "CD", "CE", "RD", "SC", "SD", "WB"],
-  },
-  CORNELL_DUBILIER: {
-    name: "Cornell Dubilier Electronics", shortCode: "CDE", website: "https://www.cde.com",
-    categories: ["Film Capacitors", "Electrolytic", "Mica"],
-    prefixes: ["940C", "942C", "944C", "946C", "947C", "948C", "SLPX"],
-  },
-  WIMA: {
-    name: "WIMA GmbH", shortCode: "WIMA", website: "https://www.wima.de",
-    categories: ["Film Capacitors"],
-    prefixes: ["MKS", "MKP", "MKC", "FKP", "FKS", "FKC", "MFP"],
-  },
-  EUROFARAD: {
-    name: "Eurofarad", shortCode: "EFD", website: "https://www.eurofarad.eu",
-    categories: ["Film Capacitors", "Power Capacitors"],
-    prefixes: ["MKP", "MKT", "PEI"],
-  },
-  KNOWLES: {
-    name: "Knowles Corporation", shortCode: "KNW", website: "https://www.knowlescapacitors.com",
-    categories: ["RF Capacitors", "MEMS Microphones"],
-    prefixes: ["B37", "B38", "B40", "B45", "MCH", "SPM", "SPU", "SPH"],
-  },
-  CALCHIP: {
-    name: "CalChip Electronics", shortCode: "CLC", website: "https://www.calchip.com",
-    categories: ["Capacitors", "Specialty Passives"],
-    prefixes: ["GMC", "GMX", "CHV", "GHQ", "GUQ", "GMG", "GMT", "HTC", "GML", "CTC", "FTC", "FTF"],
-  },
-  HOLY_STONE: {
-    name: "Holy Stone Enterprise", shortCode: "HS", website: "https://www.holystone.com.tw",
-    categories: ["MLCCs", "Ceramic Capacitors"],
-    prefixes: ["HK", "HL", "HM", "HN", "HP", "HQ", "HR"],
-  },
-  HITANO: {
-    name: "Hitano Enterprise", shortCode: "HIT", website: "https://www.hitano.com",
-    categories: ["Electrolytic Capacitors", "Film Capacitors"],
-    prefixes: ["HV", "HF", "HR"],
-  },
-  FROLYT: {
-    name: "Frolyt Kondensatoren", shortCode: "FRL", website: "https://www.frolyt.de",
-    categories: ["Electrolytic Capacitors"],
-    prefixes: ["CA", "CB", "DE", "E1", "E2", "E3", "E4"],
-  },
-  ROEDERSTEIN: {
-    name: "Roederstein (KEMET)", shortCode: "ROE", website: "https://www.kemet.com",
-    categories: ["Film Capacitors", "Electrolytic"],
-    prefixes: ["EKS", "EKR", "EKE", "EKW", "EKZ"],
-    note: "Acquired by KEMET",
-  },
-  BC_COMP: {
-    name: "BC Components (Vishay)", shortCode: "BCC", website: "https://www.vishay.com",
-    categories: ["Capacitors", "Resistors"],
-    prefixes: ["224", "225", "226", "MPT", "BC"],
-    note: "Now part of Vishay",
-  },
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve({ body: data, status: res.statusCode }));
+    });
 
-  // ── INDUCTORS & MAGNETICS ──────────────────────────────────
-  WURTH: {
-    name: "Würth Elektronik", shortCode: "WE", website: "https://www.we-online.com",
-    categories: ["Inductors", "Transformers", "Connectors", "EMC"],
-    prefixes: ["744", "748", "749", "750", "760", "763", "764", "765", "820", "885", "890"],
-  },
-  COILCRAFT: {
-    name: "Coilcraft Inc.", shortCode: "CCL", website: "https://www.coilcraft.com",
-    categories: ["Inductors", "Transformers", "RF Inductors"],
-    prefixes: ["XAL", "XGL", "XFL", "XFN", "XEL", "SER", "SRF", "MSS", "MSD", "LPS", "LPO", "LPR", "LPC", "LPD", "LPE", "DOC", "WBC"],
-  },
-  PULSE: {
-    name: "Pulse Electronics", shortCode: "PLS", website: "https://www.pulseelectronics.com",
-    categories: ["Inductors", "Transformers", "Network Magnetics"],
-    prefixes: ["PE", "PA", "PB", "HX", "TX", "PM", "PH"],
-  },
-  SUMIDA: {
-    name: "Sumida Corporation", shortCode: "SUM", website: "https://www.sumida.com",
-    categories: ["Inductors", "Transformers"],
-    prefixes: ["CDRH", "CDRR", "CDRT", "CDR", "MHVA", "CR32", "CR43", "CR54"],
-  },
-  FASTRON: {
-    name: "Fastron GmbH", shortCode: "FAT", website: "https://www.fastrongroup.com",
-    categories: ["Inductors", "Chokes", "Transformers"],
-    prefixes: ["MESC", "MESC-", "MEC", "SH", "ML", "MCCK"],
-  },
-  TALEMA: {
-    name: "Talema Electronic", shortCode: "TLM", website: "https://www.talema.com",
-    categories: ["Transformers", "Inductors", "Current Sensors"],
-    prefixes: ["AC", "AP", "AS", "ASM", "AN"],
-  },
-  MIDCOM: {
-    name: "Midcom Inc. (Würth)", shortCode: "MDC", website: "https://www.we-online.com",
-    categories: ["Transformers", "Inductors", "Telecom"],
-    prefixes: ["750", "851", "852", "854"],
-    note: "Acquired by Würth Elektronik",
-  },
-  API_DELEVAN: {
-    name: "API Delevan", shortCode: "API", website: "https://www.apidelevan.com",
-    categories: ["Inductors", "RF Chokes"],
-    prefixes: ["A-", "B-", "C-", "AF", "CF", "BF"],
-  },
-  TRIAD_MAG: {
-    name: "Triad Magnetics", shortCode: "TRI", website: "https://www.triadmagnetics.com",
-    categories: ["Transformers", "Inductors", "Chokes"],
-    prefixes: ["VPP", "VPS", "VPT", "F", "W", "D"],
-  },
-  FAIR_RITE: {
-    name: "Fair-Rite Products", shortCode: "FRP", website: "https://www.fair-rite.com",
-    categories: ["Ferrites", "EMI Suppression", "Inductors"],
-    prefixes: ["0431", "2643", "2661", "2677", "5943", "5961", "FRP"],
-  },
-  FEROXCUBE: {
-    name: "Ferroxcube", shortCode: "FXC", website: "https://www.ferroxcube.com",
-    categories: ["Ferrite Cores", "Magnetic Materials"],
-    prefixes: ["TX", "TN", "TC", "TR", "RM", "PM", "P"],
-  },
-  IBS_MAGNET: {
-    name: "IBS Magnet", shortCode: "IBS", website: "https://www.ibs-magnet.de",
-    categories: ["Magnets", "Magnetic Components"],
-    prefixes: ["IBS"],
-  },
-  TOKO: {
-    name: "Toko (TDK)", shortCode: "TOKO", website: "https://www.tdk.com",
-    categories: ["Inductors", "Filters"],
-    prefixes: ["A514", "A515", "A516", "A517", "A518", "TK1", "TK2", "TK3"],
-    note: "Acquired by TDK",
-  },
-  INDUCTRON: {
-    name: "Inductron", shortCode: "IDN", website: "https://www.inductron.de",
-    categories: ["Custom Inductors", "Transformers"],
-    prefixes: ["IDN"],
-  },
-  EPCOS: {
-    name: "EPCOS (TDK)", shortCode: "EPC", website: "https://www.tdk.com",
-    categories: ["Capacitors", "Inductors", "Filters", "Varistors"],
-    prefixes: ["B3274", "B3251", "B3292", "B72", "B57", "B59", "B30", "B40", "B88"],
-    note: "Part of TDK",
-  },
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timed out"));
+    });
 
-  // ── CONNECTORS ─────────────────────────────────────────────
-  MOLEX: {
-    name: "Molex", shortCode: "MOL", website: "https://www.molex.com",
-    categories: ["Connectors", "Cables", "Antennas"],
-    prefixes: ["0022", "0039", "0430", "0701", "1053", "2004", "5055", "87831", "0015", "0016", "0050", "0051", "0090"],
-  },
-  TE: {
-    name: "TE Connectivity", shortCode: "TE", website: "https://www.te.com",
-    categories: ["Connectors", "Sensors", "Relays"],
-    prefixes: ["MSTB", "1734", "AMP", "MTA", "AMPMODU", "SL", "282", "640", "770", "1375", "1469"],
-  },
-  AMPHENOL: {
-    name: "Amphenol", shortCode: "APH", website: "https://www.amphenol.com",
-    categories: ["Connectors", "Cables", "Sensors"],
-    prefixes: ["SV", "FCI", "10056", "10114", "ICC", "LTSC", "RADSOK"],
-  },
-  JST: {
-    name: "JST (Japan Solderless Terminal)", shortCode: "JST", website: "https://www.jst.com",
-    categories: ["Connectors", "Terminals"],
-    prefixes: ["PHR", "XHP", "ZHR", "GHR", "SHR", "EHR", "VHR", "PAR", "SMR", "CHR", "BHR", "NHR"],
-  },
-  HIROSE: {
-    name: "Hirose Electric", shortCode: "HRS", website: "https://www.hirose.com",
-    categories: ["Connectors", "Board-to-Board", "FPC/FFC"],
-    prefixes: ["DF", "FH", "FX", "GT", "HR", "LE", "LX", "MQ", "MX", "PX", "QR", "ST", "ZX"],
-  },
-  SAMTEC: {
-    name: "Samtec Inc.", shortCode: "SAM", website: "https://www.samtec.com",
-    categories: ["High-Speed Connectors", "Board-to-Board"],
-    prefixes: ["ESQT", "FTSH", "FTS", "FW", "HPAF", "HSEC", "SSM", "SSQ", "TFM", "TFW", "TMM", "TSM"],
-  },
-  HARTING: {
-    name: "HARTING Technology Group", shortCode: "HAR", website: "https://www.harting.com",
-    categories: ["Industrial Connectors", "D-Sub", "Ethernet"],
-    prefixes: ["09", "10", "14", "15", "16", "17", "19", "21", "23", "24", "25"],
-  },
-  PHOENIX_CONTACT: {
-    name: "Phoenix Contact", shortCode: "PHO", website: "https://www.phoenixcontact.com",
-    categories: ["Terminal Blocks", "Connectors", "Relays"],
-    prefixes: ["MSTB", "MSTBA", "MSTBC", "MC", "MCV", "FK", "FKC", "MKDS", "PTSA", "PTSM", "PCT"],
-  },
-  WAGO: {
-    name: "WAGO Corporation", shortCode: "WAG", website: "https://www.wago.com",
-    categories: ["Terminal Blocks", "PCB Terminals"],
-    prefixes: ["231", "232", "233", "234", "235", "236", "237", "238", "250", "256", "257", "258"],
-  },
-  GCT: {
-    name: "GCT (Global Connector Technology)", shortCode: "GCT", website: "https://gct.co",
-    categories: ["USB Connectors", "Audio Connectors", "SIM", "SD"],
-    prefixes: ["USB", "MEM", "SIM", "SD", "RFA", "RFB", "BG", "SF"],
-  },
-  CINCH: {
-    name: "Cinch Connectivity Solutions", shortCode: "CIN", website: "https://www.cinch.com",
-    categories: ["RF Connectors", "Coaxial", "Military"],
-    prefixes: ["SMA", "SMB", "SMC", "SSMB", "TNC", "BNC", "SMP"],
-  },
-  WECO: {
-    name: "WECO Electrical Connectors", shortCode: "WEC", website: "https://www.wecoconnectors.com",
-    categories: ["PCB Connectors", "Terminal Blocks"],
-    prefixes: ["4P", "AST", "ASW", "ASF"],
-  },
-  NORCOMP: {
-    name: "Norcomp", shortCode: "NRC", website: "https://www.norcomp.net",
-    categories: ["D-Sub Connectors", "RJ Connectors"],
-    prefixes: ["182", "183", "185", "DBX", "DB9", "DB15", "DB25"],
-  },
-  DEGSON: {
-    name: "Degson Electronics", shortCode: "DGS", website: "https://www.degson.com",
-    categories: ["Terminal Blocks", "PCB Connectors"],
-    prefixes: ["DG3", "DG4", "DG5", "DG9", "DG35", "DG308"],
-  },
-  CONEC: {
-    name: "CONEC Elektronische Bauelemente", shortCode: "CON", website: "https://www.conec.com",
-    categories: ["D-Sub Connectors", "Circular", "Industrial"],
-    prefixes: ["131", "132", "133", "134", "141", "143", "16"],
-  },
-  HARWIN: {
-    name: "Harwin plc", shortCode: "HRW", website: "https://www.harwin.com",
-    categories: ["High-Reliability Connectors", "Board-to-Board"],
-    prefixes: ["M22", "M30", "M50", "M80", "G70", "G125", "G8", "G9", "Gecko", "Datamate"],
-  },
-  SULLINS: {
-    name: "Sullins Electronics", shortCode: "SUL", website: "https://www.sullinscorp.com",
-    categories: ["Pin Headers", "Board-to-Board Connectors"],
-    prefixes: ["SFH", "SBH", "PBC", "PBH", "PPPC", "PREC"],
-  },
-  MILL_MAX: {
-    name: "Mill-Max Manufacturing", shortCode: "MMX", website: "https://www.mill-max.com",
-    categories: ["Spring-Loaded Connectors", "IC Sockets"],
-    prefixes: ["0305", "0307", "0347", "0456", "0457", "0489", "0907"],
-  },
-  ERNI: {
-    name: "ERNI Electronics", shortCode: "ERNI", website: "https://www.erni.com",
-    categories: ["Board-to-Board", "Wire-to-Board"],
-    prefixes: ["284", "287", "999", "154", "232", "214"],
-  },
-  EPT: {
-    name: "EPT GmbH", shortCode: "EPT", website: "https://www.ept.de",
-    categories: ["Edge Connectors", "Board-to-Board"],
-    prefixes: ["114", "308", "408", "ept"],
-  },
-  SOURIAU: {
-    name: "Souriau (Esterline)", shortCode: "SRC", website: "https://www.souriau.com",
-    categories: ["Military Connectors", "Circular Connectors", "High-Temperature"],
-    prefixes: ["UTS", "UTG", "8STA", "8SFT", "TRIM"],
-  },
-  ODU: {
-    name: "ODU - Otto Dunkel GmbH", shortCode: "ODU", website: "https://www.odu.de",
-    categories: ["Circular Connectors", "Push-Pull", "Medical"],
-    prefixes: ["ODU", "MEDI", "MINI"],
-  },
-  LEMO: {
-    name: "LEMO", shortCode: "LMO", website: "https://www.lemo.com",
-    categories: ["Push-Pull Connectors", "Coaxial", "Medical"],
-    prefixes: ["FGA", "FGG", "EGA", "EGG", "RGA", "RGG", "PCA", "PCG"],
-  },
-  AB_CONN: {
-    name: "AB Connectors", shortCode: "ABC", website: "https://www.abconnectors.com",
-    categories: ["Military Connectors", "Circular MIL-SPEC"],
-    prefixes: ["AB", "ABPE"],
-  },
-  TAG_CONNECT: {
-    name: "Tag-Connect", shortCode: "TAG", website: "https://www.tag-connect.com",
-    categories: ["Debug Connectors", "Programming Connectors"],
-    prefixes: ["TC2", "TC3", "TC0"],
-  },
-  JAE: {
-    name: "Japan Aviation Electronics (JAE)", shortCode: "JAE", website: "https://www.jae.com",
-    categories: ["Board-to-Board", "FPC", "Automotive Connectors"],
-    prefixes: ["IL-", "WP3", "WP6", "DD", "DX", "IX", "MX34"],
-  },
-  YAMAICHI: {
-    name: "Yamaichi Electronics", shortCode: "YMC", website: "https://www.yamaichi.de",
-    categories: ["IC Sockets", "Test Sockets", "SIM Card Connectors"],
-    prefixes: ["IC5", "IC1", "YS1", "YS2", "SIM"],
-  },
-  GRADCONN: {
-    name: "Gradconn", shortCode: "GRC", website: "https://www.gradconn.com",
-    categories: ["PCB Connectors", "SMA", "U.FL"],
-    prefixes: ["CA", "GRC"],
-  },
-  GRAYHILL: {
-    name: "Grayhill Inc.", shortCode: "GHL", website: "https://www.grayhill.com",
-    categories: ["Switches", "Encoders", "Connectors"],
-    prefixes: ["70M", "70MBB", "61F", "61E", "96M", "96MB"],
-  },
-  POSITRONIC: {
-    name: "Positronic Industries", shortCode: "POS", website: "https://www.connectpositronic.com",
-    categories: ["High-Current Connectors", "Military", "Aerospace"],
-    prefixes: ["FTB", "FTA", "SB", "GDB", "GDA"],
-  },
-  CINCON_CONN: {
-    name: "Cincon Electronics", shortCode: "CCN", website: "https://www.cincon.com",
-    categories: ["DC-DC Converters", "Power Modules"],
-    prefixes: ["CHB", "CFM", "CB", "CF", "EC", "ECT"],
-  },
-  SWITCHCRAFT: {
-    name: "Switchcraft / Conxall", shortCode: "SWC", website: "https://www.switchcraft.com",
-    categories: ["Audio Connectors", "Circular Connectors", "Jacks"],
-    prefixes: ["35", "42", "44", "48", "EN", "STP"],
-  },
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
 
-  // ── FUSES & PROTECTION ─────────────────────────────────────
-  EATON: {
-    name: "Eaton (Bussmann)", shortCode: "ETN", website: "https://www.eaton.com",
-    categories: ["Fuses", "Circuit Breakers", "Varistors"],
-    prefixes: ["BK/", "ATM", "ATC", "ATO", "AGC", "AGX", "AGU", "BAF", "ABC", "ABF", "FNM", "FRN", "KLK", "LPJ", "NON"],
-  },
-  SCHURTER: {
-    name: "Schurter AG", shortCode: "SCH", website: "https://www.schurter.com",
-    categories: ["Fuses", "Switches", "EMC Filters"],
-    prefixes: ["FST", "UMT", "SMD", "OMF", "MST", "KMF"],
-  },
-  BELFUSE: {
-    name: "Bel Fuse Inc.", shortCode: "BEL", website: "https://www.belfuse.com",
-    categories: ["Fuses", "Transformers", "Magnetic Components"],
-    prefixes: ["BLF", "BLN", "0ZCJ", "0ZCK", "MF-", "0685"],
-  },
-  WICKMANN: {
-    name: "Wickmann (Littelfuse)", shortCode: "WCK", website: "https://www.littelfuse.com",
-    categories: ["Fuses", "Fuse Holders"],
-    prefixes: ["WK", "FSMD", "FSF"],
-    note: "Acquired by Littelfuse",
-  },
-  MERSEN: {
-    name: "Mersen (Ferraz Shawmut)", shortCode: "MSN", website: "https://www.mersen.com",
-    categories: ["High-Power Fuses", "Surge Arresters"],
-    prefixes: ["NH", "UK", "AJT", "CRS"],
-  },
-  PROTEK: {
-    name: "Protek Devices", shortCode: "PTK", website: "https://www.protekdevices.com",
-    categories: ["TVS", "ESD", "Gas Tubes"],
-    prefixes: ["P4KE", "P6KE", "P6SMB", "P4SMB", "PSOT", "PGSOT"],
-  },
-  COMCHIP: {
-    name: "Comchip Technology", shortCode: "CCT", website: "https://www.comchiptech.com",
-    categories: ["Diodes", "TVS", "ESD", "Schottky"],
-    prefixes: ["CDBM", "CDBF", "CDBU", "CDBV", "CBF", "CZRQR", "CBZ"],
-  },
-  DIOTEC: {
-    name: "Diotec Semiconductor", shortCode: "DTC", website: "https://www.diotec.com",
-    categories: ["Diodes", "Rectifiers", "Schottky", "Zener"],
-    prefixes: ["1N4", "1N5", "1N6", "BY", "BZX", "BAT", "BAV", "BAS", "SF", "UF"],
-  },
-  WEEN_SEMI: {
-    name: "WEEN Semiconductors", shortCode: "WSS", website: "https://www.ween-semi.com",
-    categories: ["Discretes", "Protection"],
-    prefixes: ["WS1", "WS2", "WS4", "WS6"],
-  },
+// ─────────────────────────────────────────────
+// Minimal HTML text extractor (no dependencies)
+// ─────────────────────────────────────────────
+function stripTags(html) {
+  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
 
-  // ── SENSORS ────────────────────────────────────────────────
-  BOSCH: {
-    name: "Bosch Sensortec", shortCode: "BST", website: "https://www.bosch-sensortec.com",
-    categories: ["IMU", "Pressure", "Humidity", "Environmental"],
-    prefixes: ["BMI", "BMG", "BMA", "BMP", "BME", "BHI", "BNO", "BMM", "BMX"],
-  },
-  INVENSENSE: {
-    name: "InvenSense (TDK)", shortCode: "INV", website: "https://invensense.tdk.com",
-    categories: ["IMU", "Accelerometers", "Gyroscopes", "Microphones"],
-    prefixes: ["MPU", "ICM", "ICS", "IAM", "IIM", "ISM"],
-    note: "Part of TDK",
-  },
-  HONEYWELL: {
-    name: "Honeywell Sensing", shortCode: "HON", website: "https://sensing.honeywell.com",
-    categories: ["Pressure", "Temperature", "Humidity", "Hall Effect"],
-    prefixes: ["HIH", "HMC", "HMR", "RSCF", "MPRLS", "SS4"],
-  },
-  SENSIRION: {
-    name: "Sensirion AG", shortCode: "SEN", website: "https://www.sensirion.com",
-    categories: ["Humidity", "Temperature", "CO2", "Flow"],
-    prefixes: ["SHT", "SHTW", "STS", "SDP", "SFM", "SPS", "SGP", "SLF"],
-  },
-  MELEXIS: {
-    name: "Melexis", shortCode: "MLX", website: "https://www.melexis.com",
-    categories: ["Hall Effect", "Temperature", "Magnetic", "Automotive"],
-    prefixes: ["MLX9", "MLX7", "MLX8"],
-  },
-  ALLEGRO: {
-    name: "Allegro MicroSystems", shortCode: "AMS", website: "https://www.allegromicro.com",
-    categories: ["Hall Effect", "Current Sensors", "Motor Drivers"],
-    prefixes: ["A13", "A14", "A15", "A16", "A17", "A18", "A19", "A11", "A12", "ACS", "APS"],
-  },
-  AMS_OSRAM: {
-    name: "ams-OSRAM", shortCode: "AMS", website: "https://ams.com",
-    categories: ["Color Sensors", "ToF", "Proximity", "Spectral"],
-    prefixes: ["AS7", "AS6", "AS5", "AS4", "AS3", "AS2", "AS1", "TSL", "TMD", "TCS", "TMG"],
-  },
-  LEM: {
-    name: "LEM International", shortCode: "LEM", website: "https://www.lem.com",
-    categories: ["Current Sensors", "Voltage Transducers"],
-    prefixes: ["LTS", "LF", "LA", "LTSR", "LFSR", "HAB", "HAX", "HAS"],
-  },
-  BETATHERM: {
-    name: "BetaTherm (Measurement Specialties)", shortCode: "BET", website: "https://www.meas-spec.com",
-    categories: ["NTC Thermistors", "Temperature Sensors"],
-    prefixes: ["BT", "100M", "200M", "10K"],
-  },
-  AMETHERM: {
-    name: "Ametherm", shortCode: "AMT", website: "https://www.ametherm.com",
-    categories: ["NTC Thermistors", "Inrush Current Limiters"],
-    prefixes: ["SL", "MS", "WH", "CL", "EL"],
-  },
-  RFBEAM: {
-    name: "RFbeam Microwave GmbH", shortCode: "RFB", website: "https://www.rfbeam.ch",
-    categories: ["Radar Sensors", "Microwave Modules"],
-    prefixes: ["K-LC", "K-MC", "K-LD", "K-MD"],
-  },
-  ADVANCED_PHOTONIX: {
-    name: "Advanced Photonix", shortCode: "APX", website: "https://www.advancedphotonix.com",
-    categories: ["Photodetectors", "Light Sensors"],
-    prefixes: ["PDV", "OD", "SD"],
-  },
-  IMI_SENSORS: {
-    name: "IMI Sensors (PCB Piezotronics)", shortCode: "IMI", website: "https://www.imi-sensors.com",
-    categories: ["Vibration Sensors", "Accelerometers"],
-    prefixes: ["626", "622", "686", "640"],
-  },
-  SENSATA: {
-    name: "Sensata Technologies", shortCode: "ST", website: "https://www.sensata.com",
-    categories: ["Temperature", "Pressure", "Current Sensors", "Automotive"],
-    prefixes: ["PT1", "PT2", "PT4", "TS", "EV"],
-  },
-  NVE_CORP: {
-    name: "NVE Corporation", shortCode: "NVE", website: "https://www.nve.com",
-    categories: ["GMR Sensors", "Spintronic Isolators"],
-    prefixes: ["AA", "AB", "AC", "AD", "IL", "SM"],
-  },
+function extractBetween(html, startStr, endStr) {
+  const start = html.indexOf(startStr);
+  if (start === -1) return null;
+  const end = html.indexOf(endStr, start + startStr.length);
+  if (end === -1) return null;
+  return html.substring(start + startStr.length, end).trim();
+}
 
-  // ── DISPLAYS & LIGHTING ────────────────────────────────────
-  KINGBRIGHT: {
-    name: "Kingbright", shortCode: "KB", website: "https://www.kingbrightusa.com",
-    categories: ["LEDs", "7-Segment", "Dot Matrix"],
-    prefixes: ["WP", "L-", "SA", "SB", "SC", "CA", "CB", "CC", "KA", "KB", "KC", "APT", "AM", "AC", "APA", "APG"],
-  },
-  LUMEX: {
-    name: "Lumex Inc.", shortCode: "LMX", website: "https://www.lumex.com",
-    categories: ["LEDs", "Fiber Optics", "LCD"],
-    prefixes: ["SSF", "SSL", "SSI", "SSP", "SML", "SLE", "SLI", "SSH"],
-  },
-  CREE: {
-    name: "Cree LED (CreeLED)", shortCode: "CRL", website: "https://www.cree-led.com",
-    categories: ["High-Power LEDs", "COB LEDs"],
-    prefixes: ["CLM", "CLA", "CLB", "XLamp", "XP", "XT", "XB", "XQ"],
-  },
-  OSRAM: {
-    name: "OSRAM Opto Semiconductors", shortCode: "OSR", website: "https://ams.com",
-    categories: ["LEDs", "Laser Diodes", "IR Emitters"],
-    prefixes: ["SFH", "SFT", "SFL", "SFP", "LW", "LA", "LG", "LY", "LB", "LP", "LR", "LS", "LCW", "LRTB"],
-  },
-  NICHIA: {
-    name: "Nichia Corporation", shortCode: "NIC", website: "https://www.nichia.co.jp",
-    categories: ["LEDs", "Laser Diodes"],
-    prefixes: ["NVSW", "NVSL", "NVSR", "NVSB", "NS6", "NSPW", "NSPL", "NSPB", "NSSB"],
-  },
-  EVERLIGHT: {
-    name: "Everlight Electronics", shortCode: "EVL", website: "https://www.everlight.com",
-    categories: ["LEDs", "Optocouplers", "IR Sensors"],
-    prefixes: ["EL8", "ELT", "ELS", "EMI", "IR204", "IR333"],
-  },
-  LITEON: {
-    name: "Lite-On Technology", shortCode: "LON", website: "https://www.liteon.com",
-    categories: ["LEDs", "Optocouplers", "Photodetectors"],
-    prefixes: ["LTL", "LTE", "LTW", "LTG", "LTR", "LTP", "LTV", "PS", "LPC"],
-  },
-  BIVAR: {
-    name: "Bivar Inc.", shortCode: "BIV", website: "https://www.bivar.com",
-    categories: ["LED Holders", "Fiber Optics", "Displays"],
-    prefixes: ["CF", "EMB", "H4", "H5", "H6", "H8", "JD", "OFR", "SMF"],
-  },
-  DIALIGHT: {
-    name: "Dialight Corporation", shortCode: "DLT", website: "https://www.dialight.com",
-    categories: ["LED Indicators", "Panel Mount LEDs", "Industrial Lighting"],
-    prefixes: ["598", "599", "500", "501", "5590", "5540"],
-  },
-  SUNLED: {
-    name: "SunLED Company", shortCode: "SUN", website: "https://www.sunledusa.com",
-    categories: ["SMD LEDs", "Through-Hole LEDs"],
-    prefixes: ["XZM", "XZP", "XZMDK", "XZMPK", "XZFMK"],
-  },
-  VCC: {
-    name: "VCC (Visual Communications Company)", shortCode: "VCC", website: "https://www.vcclite.com",
-    categories: ["LED Indicators", "Panel Mounts", "Light Pipes"],
-    prefixes: ["1091", "4090", "LFC", "SSL", "RT"],
-  },
-  INOLUX: {
-    name: "Inolux Corporation", shortCode: "INO", website: "https://www.inolux-corp.com",
-    categories: ["RGB LEDs", "SMD LEDs", "Addressable LEDs"],
-    prefixes: ["IN-S", "IN-P", "IN-B", "IN-C", "IN-R"],
-  },
-  WOLFSPEED: {
-    name: "Wolfspeed (Cree Power)", shortCode: "WS", website: "https://www.wolfspeed.com",
-    categories: ["SiC MOSFETs", "SiC Diodes", "GaN"],
-    prefixes: ["C3M", "C2M", "CAB", "CPW4", "CREE4D", "C4D"],
-  },
-  PANJIT: {
-    name: "Panjit International", shortCode: "PJT", website: "https://www.panjit.com.tw",
-    categories: ["Diodes", "Transistors", "MOSFETs"],
-    prefixes: ["DB", "GBJ", "BR", "MB", "RS", "UF", "FR", "1N"],
-  },
+// ─────────────────────────────────────────────
+// DigiKey scraper
+// Returns: { manufacturer, mpn, description } or null
+// ─────────────────────────────────────────────
+async function searchDigiKey(partNumber) {
+  try {
+    const searchUrl = `https://www.digikey.com/en/products/result?keywords=${encodeURIComponent(
+      partNumber
+    )}&pageSize=5`;
 
-  // ── OPTOELECTRONICS ────────────────────────────────────────
-  SHARP_OPTO: {
-    name: "Sharp Microelectronics", shortCode: "SRP", website: "https://www.sharpsma.com",
-    categories: ["Optocouplers", "IR Sensors", "Displays"],
-    prefixes: ["PC8", "PC9", "GP1", "GP2", "LH"],
-  },
-  TOSHIBA_SEMI: {
-    name: "Toshiba Semiconductor", shortCode: "TSB", website: "https://toshiba.semicon-storage.com",
-    categories: ["Optocouplers", "MOSFETs", "Logic"],
-    prefixes: ["TLP", "TLX", "TC", "TMM", "TMP"],
-  },
-  ISOCOM: {
-    name: "Isocom Components", shortCode: "ISO", website: "https://www.isocom.com",
-    categories: ["Optocouplers", "Solid State Relays"],
-    prefixes: ["H11", "4N", "CNX", "ILD", "ILQ", "ILT"],
-  },
+    const { body, status } = await fetchUrl(searchUrl);
+    if (status !== 200 || !body) return null;
 
-  // ── CRYSTALS & OSCILLATORS ─────────────────────────────────
-  ABRACON: {
-    name: "Abracon LLC", shortCode: "ABR", website: "https://www.abracon.com",
-    categories: ["Crystals", "Oscillators", "Inductors", "Antennas"],
-    prefixes: ["ABM", "ABLS", "ABLNO", "ABMM", "ASFL", "ASDM", "ASEM", "ASVMB", "ACM"],
-  },
-  EPSON_TIMING: {
-    name: "Seiko Epson (Crystals/Timing)", shortCode: "EPS", website: "https://www5.epsondevice.com",
-    categories: ["Crystals", "Oscillators", "RTCs"],
-    prefixes: ["FA", "FC", "FQ", "MA", "MB", "MC", "MF", "SG", "SH", "TG", "RX8", "RX4", "RX2", "RV3"],
-  },
-  IQD: {
-    name: "IQD Frequency Products", shortCode: "IQD", website: "https://www.iqdfrequencyproducts.com",
-    categories: ["Crystals", "Oscillators", "TCXOs", "VCXOs"],
-    prefixes: ["LFXTAL", "LFSPXO", "LFTCXO", "LFVCXO", "CFPX"],
-  },
-  NDK: {
-    name: "NDK (Nihon Dempa Kogyo)", shortCode: "NDK", website: "https://www.ndk.com",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["NX3225", "NX2016", "NX1612", "NZ", "NT", "NV"],
-  },
-  RALTRON: {
-    name: "Raltron Electronics", shortCode: "RAL", website: "https://www.raltron.com",
-    categories: ["Crystals", "Oscillators", "Filters"],
-    prefixes: ["AS", "R26", "R26F", "CO4", "CO5", "CO6", "E1S", "E2S"],
-  },
-  TXCO: {
-    name: "TXC Corporation", shortCode: "TXC", website: "https://www.txccorp.com",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["7X", "7M", "7B", "7V", "8Y", "9C", "9H"],
-  },
-  CTS: {
-    name: "CTS Electronic Components", shortCode: "CTS", website: "https://www.ctscorp.com",
-    categories: ["Crystals", "Oscillators", "Filters", "Sensors"],
-    prefixes: ["407", "406", "CB3", "CB6", "CA-", "CX-", "MXO"],
-  },
-  ECS: {
-    name: "ECS Inc International", shortCode: "ECS", website: "https://www.ecsxtal.com",
-    categories: ["Crystals", "Oscillators", "Resonators"],
-    prefixes: ["ECS-", "ECX-", "ECSMPI", "ECSMT"],
-  },
-  EUROQUARTZ: {
-    name: "Euroquartz", shortCode: "EQZ", website: "https://www.euroquartz.co.uk",
-    categories: ["Crystals", "Oscillators", "TCXOs"],
-    prefixes: ["EQ", "EQX", "EQXO"],
-  },
-  FOX: {
-    name: "Fox Electronics", shortCode: "FOX", website: "https://www.foxonline.com",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["FOX", "FOXSDLF", "FXOSC", "FO7", "F4"],
-  },
-  MICRO_CRYSTAL: {
-    name: "Micro Crystal AG (Swatch Group)", shortCode: "MC", website: "https://www.microcrystal.com",
-    categories: ["Crystals", "RTCs", "Oscillators"],
-    prefixes: ["CM8", "VM8", "RV3", "RV1", "RV2", "RV5", "RV-3"],
-  },
-  JAUCH: {
-    name: "Jauch Quartz", shortCode: "JAU", website: "https://www.jauch.com",
-    categories: ["Crystals", "Oscillators", "Batteries"],
-    prefixes: ["Q", "JO", "JXO"],
-  },
-  MTRONPTI: {
-    name: "Mtron PTI", shortCode: "MTP", website: "https://www.mtronpti.com",
-    categories: ["TCXOs", "OCXOs", "VCXOs"],
-    prefixes: ["M-", "MtronPTI"],
-  },
-  CRYSTEK: {
-    name: "Crystek Crystals Corporation", shortCode: "CYSTEK", website: "https://www.crystek.com",
-    categories: ["Crystals", "Oscillators", "VCOs"],
-    prefixes: ["CCHD", "CVCXO", "CVCO", "CPRO", "CFPS", "CMOS"],
-  },
+    const results = [];
 
-  // ── SWITCHES ───────────────────────────────────────────────
-  C_K: {
-    name: "C&K Components", shortCode: "CK", website: "https://www.ckswitches.com",
-    categories: ["Tactile", "Toggle", "Rocker Switches"],
-    prefixes: ["PTS", "JS", "JM", "KG", "KMR", "PCM", "PG", "ES6", "OS", "SS"],
-  },
-  OMRON_SW: {
-    name: "Omron Switches", shortCode: "OMR", website: "https://components.omron.com",
-    categories: ["Microswitches", "Tactile", "Pushbutton"],
-    prefixes: ["B3F", "B3G", "B3M", "B3P", "B3S", "B3T", "B3U", "B3W", "D2F", "D3V", "D6F"],
-  },
-  ALPS: {
-    name: "Alps Alpine", shortCode: "ALPS", website: "https://www.alpsalpine.com",
-    categories: ["Switches", "Encoders", "Potentiometers"],
-    prefixes: ["SKRP", "SKRK", "SKRMAB", "SKHH", "EC", "RK", "RH", "RN"],
-  },
-  E_SWITCH: {
-    name: "E-Switch", shortCode: "ESW", website: "https://www.e-switch.com",
-    categories: ["Tactile", "Pushbutton", "Rocker"],
-    prefixes: ["TL", "TW", "EG", "RP", "DM", "KS"],
-  },
-  APEM: {
-    name: "APEM (IDC Technologies)", shortCode: "APM", website: "https://www.apem.com",
-    categories: ["Industrial Switches", "Joysticks", "Keypads"],
-    prefixes: ["AV", "IHR", "IP", "IM", "IS", "AHC", "C"],
-  },
-  NKK_SW: {
-    name: "NKK Switches", shortCode: "NKK", website: "https://www.nkkswitches.com",
-    categories: ["Toggle", "Pushbutton", "Rocker Switches"],
-    prefixes: ["M2", "M2T", "BB", "BB15", "JB", "MB2", "S", "S-"],
-  },
-  MARQUARDT: {
-    name: "Marquardt GmbH", shortCode: "MQT", website: "https://www.marquardt.de",
-    categories: ["Switches", "Sensors", "Automotive Switches"],
-    prefixes: ["1251", "1840", "1843", "3250", "3247"],
-  },
-  KISSLING: {
-    name: "Kissling Elektrotechnik", shortCode: "KIS", website: "https://www.kissling.de",
-    categories: ["Industrial Switches", "Rotary Switches"],
-    prefixes: ["KIS", "01", "02", "03", "04"],
-  },
+    // Strategy 1: JSON-LD structured data
+    const jsonLdMatches = body.match(
+      /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+    );
+    if (jsonLdMatches) {
+      for (const block of jsonLdMatches) {
+        try {
+          const json = JSON.parse(
+            block.replace(/<script[^>]*>/, "").replace(/<\/script>/, "")
+          );
+          const items = Array.isArray(json) ? json : [json];
+          for (const item of items) {
+            if (item.brand && item.brand.name) {
+              results.push({
+                manufacturer: item.brand.name.trim(),
+                mpn: (item.mpn || item.sku || partNumber).trim(),
+                description: (item.description || item.name || "").trim(),
+                source: "digikey",
+              });
+            }
+          }
+        } catch (_) {}
+      }
+    }
 
-  // ── RELAYS ─────────────────────────────────────────────────
-  OMRON: {
-    name: "Omron Corporation", shortCode: "OMR", website: "https://components.omron.com",
-    categories: ["Relays", "Switches", "Sensors"],
-    prefixes: ["G5V", "G6H", "G6J", "G6K", "G6L", "G6M", "G5CA", "G5CB", "G5LA", "G5LE", "G5NB", "G5PA", "G5Q", "MY", "MK", "LY"],
-  },
-  FINDER: {
-    name: "Finder SpA", shortCode: "FND", website: "https://www.findernet.com",
-    categories: ["Relays", "Timers", "Interface Modules"],
-    prefixes: ["40.", "41.", "38.", "39.", "55.", "56.", "60.", "61.", "62."],
-  },
-  FUJITSU_RELAY: {
-    name: "Fujitsu Components", shortCode: "FJS", website: "https://www.fujitsu.com",
-    categories: ["Relays"],
-    prefixes: ["FBR", "FTR", "FHR"],
-  },
-  MEDER: {
-    name: "Meder Electronic (Standex-Meder)", shortCode: "MED", website: "https://www.standexelectronics.com",
-    categories: ["Reed Relays", "Reed Sensors", "Hall Sensors"],
-    prefixes: ["SIL", "DIL", "HE", "DIP"],
-  },
-  ZETTLER: {
-    name: "Zettler Electronics (American Zettler)", shortCode: "ZTL", website: "https://www.azettler.com",
-    categories: ["Relays", "Transformers"],
-    prefixes: ["AZ", "AZ94", "AZ21", "AZ101", "AZ822"],
-  },
-  SCHRACK: {
-    name: "Schrack (TE Connectivity)", shortCode: "SCR", website: "https://www.te.com",
-    categories: ["Power Relays", "PCB Relays"],
-    prefixes: ["RT", "RP", "RM", "RY", "PT"],
-    note: "Part of TE Connectivity",
-  },
+    if (results.length > 0) return results;
 
-  // ── POWER SUPPLIES & CONVERTERS ────────────────────────────
-  VICOR: {
-    name: "Vicor Corporation", shortCode: "VCR", website: "https://www.vicorpower.com",
-    categories: ["DC-DC Converters", "Power Modules"],
-    prefixes: ["VI-", "DCM", "BCM", "SAC", "PRM", "VTM", "ZVS"],
-  },
-  MEAN_WELL: {
-    name: "MEAN WELL Enterprises", shortCode: "MWL", website: "https://www.meanwell.com",
-    categories: ["Power Supplies", "LED Drivers"],
-    prefixes: ["RS-", "SE-", "SD-", "DR-", "LRS-", "HLG-", "ELG-", "XLG-"],
-  },
-  RECOM: {
-    name: "RECOM Power", shortCode: "REC", website: "https://www.recom-power.com",
-    categories: ["DC-DC Converters", "AC-DC Converters"],
-    prefixes: ["R-", "RP", "RS", "RK", "RH", "R05", "R1", "R2", "R3"],
-  },
-  TRACO: {
-    name: "TRACO Power", shortCode: "TRP", website: "https://www.tracopower.com",
-    categories: ["DC-DC Converters", "AC-DC Modules"],
-    prefixes: ["TEN", "TDN", "TSR", "TMR", "THM", "THL", "TEL", "TDL", "TXL", "THD"],
-  },
-  XP_POWER: {
-    name: "XP Power", shortCode: "XPP", website: "https://www.xppower.com",
-    categories: ["AC-DC Converters", "DC-DC Converters"],
-    prefixes: ["ECE", "ECF", "ECL", "ECM", "ECS", "JCE", "JCF", "JCL", "JCM", "JCS", "DHL", "DHB"],
-  },
-  GAIA: {
-    name: "GAIA Converter", shortCode: "GAC", website: "https://www.gaiaconverter.com",
-    categories: ["Space-Grade DC-DC Converters"],
-    prefixes: ["MGDM", "MGHF", "MGDC", "MGDS"],
-  },
-  P_DUKE: {
-    name: "P-Duke Technology", shortCode: "PDK", website: "https://www.p-duke.com",
-    categories: ["DC-DC Converters", "AC-DC Converters"],
-    prefixes: ["PDQ", "PDA", "MEC", "TMP", "TOF"],
-  },
-  MTM_POWER: {
-    name: "MTM Power", shortCode: "MTM", website: "https://www.mtm-power.com",
-    categories: ["DC-DC Converters", "Power Supplies"],
-    prefixes: ["MTMS", "MTMD", "MTMQ"],
-  },
-  CUI: {
-    name: "CUI Inc (Bel Fuse)", shortCode: "CUI", website: "https://www.cuidevices.com",
-    categories: ["AC-DC Converters", "DC-DC Converters", "Connectors"],
-    prefixes: ["SDI", "SDS", "SDP", "SDV", "VXO", "VX7", "VX1", "PJ-", "SJ-", "CP-"],
-    note: "Acquired by Bel Fuse",
-  },
-  MORNSUN: {
-    name: "Mornsun Guangzhou Science & Technology", shortCode: "MSN", website: "https://www.mornsun-power.com",
-    categories: ["DC-DC Converters", "AC-DC Converters", "Isolated Converters"],
-    prefixes: ["B", "F", "K", "L", "Q", "W", "URB", "WRB", "VRB"],
-  },
-  BLOCK: {
-    name: "Block Transformatoren", shortCode: "BLK", website: "https://www.block.eu",
-    categories: ["Transformers", "Power Supplies", "Chokes"],
-    prefixes: ["STE", "STN", "TE6", "TE2", "SVR", "VCH"],
-  },
-  DELTA_ELEC: {
-    name: "Delta Electronics", shortCode: "DEL", website: "https://www.deltaww.com",
-    categories: ["Power Supplies", "Fans", "Converters"],
-    prefixes: ["LFB", "DCP", "DAP", "PMD"],
-  },
-  POWERONE: {
-    name: "Power-One (ABB)", shortCode: "P1", website: "https://new.abb.com",
-    categories: ["Power Supplies", "DC-DC Converters"],
-    prefixes: ["HB", "HBW", "RAM", "MAP", "PFC"],
-    note: "Acquired by ABB",
-  },
+    // Strategy 2: Look for manufacturer name in HTML patterns
+    // DigiKey typically has: "Manufacturer" label followed by manufacturer name
+    const mfrPatterns = [
+      /data-testid="manufacturer-value"[^>]*>([^<]+)</i,
+      /"manufacturer"\s*:\s*"([^"]+)"/i,
+      /class="[^"]*manufacturer[^"]*"[^>]*>([^<]{3,60})</i,
+      /Manufacturer<\/[^>]+>[^<]*<[^>]+>([^<]{3,60})</i,
+    ];
 
-  // ── EMC & CABLE COMPONENTS ─────────────────────────────────
-  SCHAFFNER: {
-    name: "Schaffner Group", shortCode: "SFN", website: "https://www.schaffner.com",
-    categories: ["EMI Filters", "Power Magnetics", "Chokes"],
-    prefixes: ["FN", "RN", "SN", "EN", "BN"],
-  },
-  LAIRD: {
-    name: "Laird Connectivity", shortCode: "LAI", website: "https://www.lairdconnect.com",
-    categories: ["WiFi", "Bluetooth", "EMC", "Antennas"],
-    prefixes: ["BL5", "BL6", "WB5", "WB6", "HH", "HC", "28B"],
-  },
-  FAIR_RITE_EMC: {
-    name: "Fair-Rite (EMC Products)", shortCode: "FRP", website: "https://www.fair-rite.com",
-    categories: ["Ferrite Beads", "Cable Cores", "EMI Suppression"],
-    prefixes: ["0431", "2643", "2661", "2677", "5943"],
-  },
-  STEWARD: {
-    name: "Laird/Steward Inc.", shortCode: "STW", website: "https://www.laird.com",
-    categories: ["EMC Ferrite Products", "Chip Beads"],
-    prefixes: ["HI", "LI", "MI", "SI"],
-  },
-  BELDEN: {
-    name: "Belden Inc.", shortCode: "BLD", website: "https://www.belden.com",
-    categories: ["Cables", "Connectors", "Networking"],
-    prefixes: ["9", "1", "8", "7", "Y", "Z"],
-  },
-  TELEGAERTNER: {
-    name: "Telegärtner", shortCode: "TLG", website: "https://www.telegaertner.com",
-    categories: ["RF Connectors", "Cables", "Network Connectors"],
-    prefixes: ["J01", "J15", "J01150", "J01070", "J01440"],
-  },
-  ROSENBERGER: {
-    name: "Rosenberger", shortCode: "RSB", website: "https://www.rosenberger.de",
-    categories: ["RF Connectors", "Fiber Optic", "High-Frequency"],
-    prefixes: ["32", "17", "40", "65", "00"],
-  },
-  HUBER_SUHNER: {
-    name: "HUBER+SUHNER", shortCode: "HSU", website: "https://www.hubersuhner.com",
-    categories: ["RF Connectors", "Cables", "Fiber Optics"],
-    prefixes: ["22", "82", "11", "65", "SMA", "SMB"],
-  },
+    for (const pattern of mfrPatterns) {
+      const match = body.match(pattern);
+      if (match && match[1] && match[1].trim().length > 1) {
+        results.push({
+          manufacturer: match[1].trim(),
+          mpn: partNumber,
+          description: "",
+          source: "digikey",
+        });
+      }
+    }
 
-  // ── BATTERIES & ENERGY STORAGE ─────────────────────────────
-  RENATA: {
-    name: "Renata SA (Swatch Group)", shortCode: "RNT", website: "https://www.renata.com",
-    categories: ["Coin Cell Batteries", "Lithium Batteries"],
-    prefixes: ["CR", "SR", "BR", "MS", "CA"],
-  },
-  TADIRAN: {
-    name: "Tadiran Batteries", shortCode: "TAD", website: "https://www.tadiranbat.com",
-    categories: ["Lithium Batteries", "Bobbin Cells"],
-    prefixes: ["TL", "SL", "ER"],
-  },
-  RAYOVAC: {
-    name: "Rayovac (Spectrum Brands)", shortCode: "RYV", website: "https://www.rayovac.com",
-    categories: ["Consumer Batteries"],
-    prefixes: ["RYV", "RP", "RH"],
-  },
-  MAXWELL: {
-    name: "Maxwell Technologies (Tesla)", shortCode: "MXW", website: "https://www.maxwell.com",
-    categories: ["Ultracapacitors", "Energy Storage"],
-    prefixes: ["BCAP", "PC5", "HC"],
-    note: "Acquired by Tesla",
-  },
+    // Strategy 3: Search for part number page directly
+    if (results.length === 0) {
+      const directUrl = `https://www.digikey.com/en/products/search#?keywords=${encodeURIComponent(
+        partNumber
+      )}`;
+      // Try extracting from meta tags
+      const metaMfr = body.match(
+        /<meta[^>]*property="product:brand"[^>]*content="([^"]+)"/i
+      );
+      if (metaMfr) {
+        results.push({
+          manufacturer: metaMfr[1].trim(),
+          mpn: partNumber,
+          description: "",
+          source: "digikey",
+        });
+      }
+    }
 
-  // ── THERMAL MANAGEMENT ─────────────────────────────────────
-  AAVID: {
-    name: "Aavid Thermalloy (Boyd)", shortCode: "AVD", website: "https://www.boydcorp.com",
-    categories: ["Heatsinks", "Thermal Interface Materials"],
-    prefixes: ["5801", "5821", "4101", "4110", "CSHL", "CHA"],
-    note: "Part of Boyd Corporation",
-  },
-  BERGQUIST: {
-    name: "Bergquist (Henkel)", shortCode: "BGQ", website: "https://www.henkel.com",
-    categories: ["Thermal Interface Materials", "Insulation"],
-    prefixes: ["GP", "GP3000", "GP5000", "TP"],
-    note: "Acquired by Henkel",
-  },
-  BOYD: {
-    name: "Boyd Corporation", shortCode: "BYD", website: "https://www.boydcorp.com",
-    categories: ["Heatsinks", "Thermal Management", "EMI Shielding"],
-    prefixes: ["BRD"],
-  },
-  KITAGAWA: {
-    name: "Kitagawa Industries America", shortCode: "KGA", website: "https://www.kitagawa-ind.com",
-    categories: ["EMI Shielding", "Grounding", "Spacers"],
-    prefixes: ["SA", "FBS", "BCS", "SCO", "SPC"],
-  },
-  CHOMERICS: {
-    name: "Chomerics (Parker)", shortCode: "CHO", website: "https://chomerics.com",
-    categories: ["EMI Gaskets", "Thermal Interface Materials"],
-    prefixes: ["CHO-SEAL", "SOFT-SHIELD", "THERMATTACH"],
-  },
+    return results.length > 0 ? results : null;
+  } catch (err) {
+    console.error("DigiKey error:", err.message);
+    return null;
+  }
+}
 
-  // ── AUDIO ──────────────────────────────────────────────────
-  CIRRUS: {
-    name: "Cirrus Logic", shortCode: "CRL", website: "https://www.cirrus.com",
-    categories: ["Audio ADC/DAC", "Codecs", "Amplifiers"],
-    prefixes: ["CS4", "CS5", "WM8", "WM9"],
-  },
+// ─────────────────────────────────────────────
+// DigiKey API v4 (public search endpoint, no key needed for basic search)
+// ─────────────────────────────────────────────
+async function searchDigiKeyAPI(partNumber) {
+  try {
+    // DigiKey has a public autocomplete / keyword search that returns JSON
+    const apiUrl = `https://www.digikey.com/api/recommendations/v1/search?searchTerm=${encodeURIComponent(
+      partNumber
+    )}&limit=5&locale=en-US`;
 
-  // ── ISOLATION ──────────────────────────────────────────────
-  ADI_ISO: {
-    name: "Analog Devices Isolators (iCoupler)", shortCode: "ADI", website: "https://www.analog.com",
-    categories: ["Digital Isolators", "isoPower"],
-    prefixes: ["ADuM1", "ADuM2", "ADuM3", "ADuM4", "ADuM5", "ADuM6"],
-  },
+    const { body, status } = await fetchUrl(apiUrl, {
+      headers: { Accept: "application/json" },
+    });
 
-  // ── INTERFACE & COMMUNICATION ──────────────────────────────
-  MAXLINEAR: {
-    name: "MaxLinear (Exar)", shortCode: "MXL", website: "https://www.maxlinear.com",
-    categories: ["RS-232", "RS-485", "UART", "CAN", "Broadband"],
-    prefixes: ["SP3", "SP4", "SP5", "SP6", "SP7", "SP8", "XR", "XRA"],
-  },
-  HALO: {
-    name: "Halo Electronics", shortCode: "HAL", website: "https://www.haloelectronics.com",
-    categories: ["Network Magnetics", "Transformers", "PoE"],
-    prefixes: ["HFJ", "HFM", "HND", "TG", "SI-", "F"],
-  },
-  BEL_POWER_SIGNAL: {
-    name: "Bel Signal Transformers", shortCode: "BEL", website: "https://www.belfuse.com",
-    categories: ["Network Magnetics", "Signal Transformers"],
-    prefixes: ["0826", "0878", "S558", "T60"],
-  },
-  SEMIKRON: {
-    name: "Semikron International", shortCode: "SMK", website: "https://www.semikron.com",
-    categories: ["Power Modules", "IGBTs", "Rectifiers", "Inverters"],
-    prefixes: ["SKM", "SKD", "SKCH", "SKIIP", "SKKD", "MDD", "MDS", "SKB", "SKN"],
-  },
-  VINCOTECH: {
-    name: "Vincotech GmbH", shortCode: "VCT", website: "https://www.vincotech.com",
-    categories: ["Power Modules", "IGBT Modules"],
-    prefixes: ["FCO", "FCT", "FCA", "FCB", "0MCA"],
-  },
+    if (status !== 200) return null;
+    const data = JSON.parse(body);
 
-  // ── PROGRAMMABLE LOGIC ─────────────────────────────────────
-  ALTERA: {
-    name: "Altera (Intel)", shortCode: "ALT", website: "https://www.intel.com",
-    categories: ["FPGAs", "CPLDs"],
-    prefixes: ["EP1", "EP2", "EP3", "EP4", "EP9", "5A", "5M", "10M", "10A"],
-    note: "Acquired by Intel",
-  },
-  ACTEL: {
-    name: "Actel (Microsemi/Microchip)", shortCode: "ACT", website: "https://www.microsemi.com",
-    categories: ["FPGAs", "Radiation-Hardened"],
-    prefixes: ["A3P", "A2F", "RT3P", "RTAX", "RTG"],
-    note: "Acquired by Microsemi, now Microchip",
-  },
+    const results = [];
+    const items = data.products || data.results || data.items || [];
+    for (const item of items) {
+      const mfr =
+        item.manufacturer?.name ||
+        item.manufacturerName ||
+        item.brand?.name ||
+        null;
+      if (mfr) {
+        results.push({
+          manufacturer: mfr.trim(),
+          mpn: (item.manufacturerPartNumber || item.mpn || partNumber).trim(),
+          description: (item.description || item.productDescription || "").trim(),
+          source: "digikey-api",
+        });
+      }
+    }
 
-  // ── MISC SEMICONDUCTOR ─────────────────────────────────────
-  AGAGILENT: {
-    name: "Agilent Technologies (Keysight)", shortCode: "AGIL", website: "https://www.keysight.com",
-    categories: ["Optocouplers", "Test Equipment"],
-    prefixes: ["HCPL", "HCNR", "HLMP", "HDSP"],
-    note: "Now Keysight Technologies",
-  },
-  AVAGO: {
-    name: "Avago Technologies (Broadcom)", shortCode: "AVGO", website: "https://www.broadcom.com",
-    categories: ["Optocouplers", "RF", "Fiber Optics"],
-    prefixes: ["ACPL", "HCPL", "AFBR", "MGA", "ALT"],
-    note: "Merged into Broadcom",
-  },
+    return results.length > 0 ? results : null;
+  } catch (_) {
+    return null;
+  }
+}
 
-  // ── MECHANICAL & HARDWARE ──────────────────────────────────
-  KEYSTONE: {
-    name: "Keystone Electronics Corp.", shortCode: "KEY", website: "https://www.keyelco.com",
-    categories: ["Battery Holders", "PCB Standoffs", "Terminals"],
-    prefixes: ["1042", "1043", "1060", "106", "209", "500", "501", "502", "503"],
-  },
-  ETTINGER: {
-    name: "Ettinger GmbH", shortCode: "ETG", website: "https://www.ettinger.de",
-    categories: ["PCB Standoffs", "Spacers", "Screws"],
-    prefixes: ["05.", "06.", "08.", "09.", "10.", "12."],
-  },
-  BOSSARD: {
-    name: "Bossard Group", shortCode: "BSS", website: "https://www.bossard.com",
-    categories: ["Fasteners", "Screws", "Nuts", "Washers"],
-    prefixes: ["BSS"],
-  },
-  PEM: {
-    name: "PEM (Penn Engineering)", shortCode: "PEM", website: "https://www.pemnet.com",
-    categories: ["Fasteners", "Standoffs", "Nuts"],
-    prefixes: ["CLS", "CLSS", "FE", "FEI", "FH", "HN", "HNL", "BS", "S", "SC", "PEM"],
-  },
-  RICHCO: {
-    name: "Richco Inc.", shortCode: "RHC", website: "https://www.richco-inc.com",
-    categories: ["PCB Supports", "Cable Ties", "Spacers"],
-    prefixes: ["RBS", "SBC", "SCB", "PCB"],
-  },
+// ─────────────────────────────────────────────
+// Mouser scraper
+// ─────────────────────────────────────────────
+async function searchMouser(partNumber) {
+  try {
+    const searchUrl = `https://www.mouser.com/c/?q=${encodeURIComponent(
+      partNumber
+    )}`;
 
-  // ── ADDITIONAL MANUFACTURERS FROM SUPPLIED LIST ────────────
-  AMIC: {
-    name: "AMIC Technology", shortCode: "AMIC", website: "https://www.amictechnology.com",
-    categories: ["Flash Memory", "EEPROM"],
-    prefixes: ["A25", "A29", "A6", "AC"],
-  },
-  ANTHEM: {
-    name: "Anthem (Anthem Blue Cross)", shortCode: "ANB", website: "https://www.amictechnology.com",
-    categories: ["Memory ICs"],
-    prefixes: [],
-  },
-  CAPAX: {
-    name: "Capax Technologies", shortCode: "CPX", website: "https://www.capaxtech.com",
-    categories: ["Capacitors", "Passive Components"],
-    prefixes: ["CPC"],
-  },
-  CEGELEC: {
-    name: "Cegelec", shortCode: "CEG", website: "https://www.cegelec.com",
-    categories: ["Industrial Electronics", "Power Systems"],
-    prefixes: ["CEG"],
-  },
-  CONCORD: {
-    name: "Concord Semiconductor", shortCode: "CSD", website: "https://www.concordsemi.com",
-    categories: ["Discretes", "MOSFETs"],
-    prefixes: ["CS1", "CS2", "CS3", "CS4"],
-  },
-  COMUS: {
-    name: "Comus International", shortCode: "COM", website: "https://www.comus-international.com",
-    categories: ["Tilt Sensors", "Reed Switches", "Vibration Sensors"],
-    prefixes: ["3400", "3500", "3600", "3700"],
-  },
-  DOLD: {
-    name: "E. Dold & Söhne", shortCode: "DOL", website: "https://www.dold.com",
-    categories: ["Safety Relays", "Monitoring Relays", "Timers"],
-    prefixes: ["BA", "BH", "BI", "MK", "IL"],
-  },
-  ELESTA: {
-    name: "Elesta Relays", shortCode: "ELS", website: "https://www.elesta.com",
-    categories: ["Reed Relays", "Signal Relays"],
-    prefixes: ["RM", "RH", "RE"],
-  },
-  GREENLIANTS: {
-    name: "Greenliant Systems", shortCode: "GLS", website: "https://www.greenliant.com",
-    categories: ["NAND Flash", "eMMC", "SSDs"],
-    prefixes: ["GLS", "GN"],
-  },
-  HMS: {
-    name: "HMS Industrial Networks", shortCode: "HMS", website: "https://www.hms-networks.com",
-    categories: ["Industrial Communication", "Gateways", "IO-Link"],
-    prefixes: ["AB", "HI"],
-  },
-  INPAQ: {
-    name: "Inpaq Technology", shortCode: "INP", website: "https://www.inpaq.com.tw",
-    categories: ["EMI Filters", "ESD Protection", "Ferrite Beads"],
-    prefixes: ["ESD", "EMF", "SNL", "SMP"],
-  },
-  JOHANSEN_TECH: {
-    name: "Johanson Technology", shortCode: "JTI", website: "https://www.johansontechnology.com",
-    categories: ["RF Capacitors", "Inductors", "Filters"],
-    prefixes: ["0402", "0603", "0805", "251", "302", "402", "502"],
-  },
-  JOHANSEN_DIEL: {
-    name: "Johanson Dielectrics", shortCode: "JDI", website: "https://www.johansondielectrics.com",
-    categories: ["MLCCs", "High-Voltage Capacitors"],
-    prefixes: ["500S", "505S", "508S"],
-  },
-  KHATOD: {
-    name: "Khatod Optoelectronic", shortCode: "KHD", website: "https://www.khatod.com",
-    categories: ["Optical Lenses", "LED Optics"],
-    prefixes: ["KHD", "QR", "M"],
-  },
-  LANTIQ: {
-    name: "Lantiq GmbH (Intel)", shortCode: "LNT", website: "https://www.intel.com",
-    categories: ["DSL ICs", "Home Gateway"],
-    prefixes: ["LANTIQ", "GRX", "VRX", "PEF"],
-    note: "Acquired by Intel",
-  },
-  LEACH: {
-    name: "Leach International", shortCode: "LCH", website: "https://www.esterline.com",
-    categories: ["Aerospace Relays", "Power Contactors"],
-    prefixes: ["L"],
-  },
-  MAUCH: {
-    name: "Mauch Elektronik", shortCode: "MAU", website: "https://www.mauch-electronic.com",
-    categories: ["Current Sensors", "Power Modules", "UAV Electronics"],
-    prefixes: ["PL-", "HS-", "BEC-"],
-  },
-  MURATA_VIOS: {
-    name: "Murata Vios (Power Solutions)", shortCode: "MUR", website: "https://www.murata.com",
-    categories: ["DC-DC Converters", "Power Modules"],
-    prefixes: ["OKI", "MEE", "MEF", "MEM", "NCS"],
-  },
-  PANASONIC_EW: {
-    name: "Panasonic Electric Works", shortCode: "PAN", website: "https://www.panasonic-electric-works.com",
-    categories: ["Relays", "Sensors", "PLCs"],
-    prefixes: ["AQ", "ALQ", "AGQ"],
-  },
-  PCA_ELEC: {
-    name: "PCA Electronics", shortCode: "PCA", website: "https://www.pcaelectronics.com",
-    categories: ["Inductors", "Transformers", "Custom Magnetics"],
-    prefixes: ["PCA"],
-  },
-  QANTEK: {
-    name: "Qantek Technology", shortCode: "QTK", website: "https://www.qantek.com.tw",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["QC", "QX", "QST"],
-  },
-  SAAB: {
-    name: "SAME SKY (Formerly Mouser Same Sky)", shortCode: "SSK", website: "https://www.samesky.com",
-    categories: ["Crystals", "Oscillators", "Connectors", "Inductors"],
-    prefixes: ["ECS", "ASR", "ASPI", "ABM3"],
-  },
-  SEMITEK: {
-    name: "Semitec Corporation", shortCode: "STC", website: "https://www.semitec.co.jp",
-    categories: ["NTC Thermistors", "Temperature Sensors"],
-    prefixes: ["104NT", "103NT", "404NT", "202ET", "303ET"],
-  },
-  SWISSBIT: {
-    name: "Swissbit AG", shortCode: "SWB", website: "https://www.swissbit.com",
-    categories: ["NAND Flash", "eMMC", "Industrial SSDs"],
-    prefixes: ["SFB", "SFCM", "SFEI", "SFEM"],
-  },
-  SYFER: {
-    name: "Syfer Technology (Knowles)", shortCode: "SYF", website: "https://www.knowlescapacitors.com",
-    categories: ["EMI Filters", "Feedthrough Capacitors"],
-    prefixes: ["SYF", "0603Y", "1206Y", "2220Y"],
-    note: "Part of Knowles",
-  },
-  TAI_TECH: {
-    name: "Tai-Tech Advanced Electronics", shortCode: "TAI", website: "https://www.tai-tech.com",
-    categories: ["Power Inductors", "Chokes"],
-    prefixes: ["TAITEC", "SPC", "CDRH"],
-  },
-  TAITIEN: {
-    name: "Taitien Electronics", shortCode: "TTN", website: "https://www.taitien.com",
-    categories: ["Crystals", "Oscillators", "TCXOs"],
-    prefixes: ["TXC", "NT", "NX", "NV", "VT"],
-  },
-  TAMURA: {
-    name: "Tamura Corporation", shortCode: "TAM", website: "https://www.tamura-ss.co.jp",
-    categories: ["Transformers", "Current Sensors", "Inductors"],
-    prefixes: ["3FD", "A55", "A56", "FPT", "L01", "L08", "TSA"],
-  },
-  THOMAS_BETTS: {
-    name: "Thomas & Betts (ABB)", shortCode: "TNB", website: "https://electrification.us.abb.com",
-    categories: ["Connectors", "Cable Management", "Electrical"],
-    prefixes: ["TY", "TYR", "MTY", "HW"],
-    note: "Acquired by ABB",
-  },
-  TQ_SYSTEMS: {
-    name: "TQ-Systems GmbH", shortCode: "TQS", website: "https://www.tq-group.com",
-    categories: ["Embedded Modules", "Power Electronics"],
-    prefixes: ["TQ", "MBa", "TQMa"],
-  },
-  TRANSCEND: {
-    name: "Transcend Information", shortCode: "TSI", website: "https://www.transcend-info.com",
-    categories: ["Flash Storage", "SSDs", "Memory"],
-    prefixes: ["TS", "JF", "PSD"],
-  },
-  UNISONIC: {
-    name: "Unisonic Technologies", shortCode: "UTC", website: "https://www.unisonic.com.tw",
-    categories: ["Transistors", "MOSFETs", "Hall Sensors", "Op-Amps"],
-    prefixes: ["UTC", "U", "L78", "L79", "LM2", "UPC"],
-  },
-  VIKING: {
-    name: "Viking Tech", shortCode: "VKG", website: "https://www.viking.com.tw",
-    categories: ["Resistors", "Capacitors"],
-    prefixes: ["ARJ", "ARC", "ARL", "CSR", "CSNL"],
-  },
-  VPG: {
-    name: "VPG Foil Resistors (Vishay)", shortCode: "VPG", website: "https://www.vpgsensors.com",
-    categories: ["Precision Resistors", "Foil Resistors", "Load Cells"],
-    prefixes: ["VPG", "Y1", "Y0", "S102", "S100"],
-  },
-  EPSON_CRYSTAL: {
-    name: "Epson Crystal Device", shortCode: "ECD", website: "https://www5.epsondevice.com",
-    categories: ["Crystals", "Gyroscopes"],
-    prefixes: ["TSR", "XV"],
-  },
-  CTS_CORP: {
-    name: "CTS Corporation", shortCode: "CTS", website: "https://www.ctscorp.com",
-    categories: ["Frequency Control", "Sensors", "Actuators"],
-    prefixes: ["CAT", "CAL", "CA4", "CB6", "406", "407", "MO"],
-  },
-  ECLIPTEK: {
-    name: "Ecliptek Corporation", shortCode: "ECL", website: "https://www.ecliptek.com",
-    categories: ["Oscillators", "Crystals", "TCXOs"],
-    prefixes: ["EC2", "EC2645", "EC26", "ECX"],
-  },
-  CITIZEN: {
-    name: "Citizen Finedevice", shortCode: "CFD", website: "https://www.citizenfinedevice.co.jp",
-    categories: ["Crystals", "Oscillators", "Sensors"],
-    prefixes: ["CS10", "CS20", "CX20", "CMR"],
-  },
-  NIDEC_COPAL: {
-    name: "Nidec Copal Electronics", shortCode: "NCE", website: "https://www.nidec-copal-electronics.com",
-    categories: ["Encoders", "Sensors", "Switches", "Pressure Sensors"],
-    prefixes: ["PG7", "PG12", "RE11", "SR10", "SR15", "NPA", "NPP"],
-  },
-  COAX_CONN: {
-    name: "Coax Connectors Ltd", shortCode: "CXC", website: "https://www.coaxconnectors.co.uk",
-    categories: ["RF Coaxial Connectors"],
-    prefixes: ["SMA", "BNC", "SMB", "TNC"],
-  },
-  CONIVERSS: {
-    name: "Coninvers GmbH", shortCode: "CNV", website: "https://www.coninvers.de",
-    categories: ["Circular Connectors", "Industrial Connectors"],
-    prefixes: ["SP2", "SP1", "WB", "DB"],
-  },
-  E_TEC: {
-    name: "E-TEC Interconnect", shortCode: "ETC", website: "https://www.e-tec.com",
-    categories: ["Board-to-Board Connectors", "PCB Connectors"],
-    prefixes: ["E-TEC", "ME", "CA"],
-  },
-  COMPAGNIE_DEUTSCH: {
-    name: "Compagnie Deutsch (TE)", shortCode: "CDT", website: "https://www.te.com",
-    categories: ["Aerospace Connectors", "Circular"],
-    prefixes: ["DTS", "DTF", "DTP"],
-    note: "Part of TE Connectivity",
-  },
-  BINDER_CONN: {
-    name: "Binder GmbH", shortCode: "BDR", website: "https://www.binder-connector.com",
-    categories: ["Circular Connectors", "Sensor Connectors"],
-    prefixes: ["09-", "12-", "16-", "17-", "70-", "71-", "77-", "78-", "79-", "80-", "86-", "87-", "88-", "09"],
-  },
-  LUMBERG: {
-    name: "Lumberg Holding", shortCode: "LMB", website: "https://www.lumberg.com",
-    categories: ["Circular Connectors", "PCB Connectors", "Cable Connectors"],
-    prefixes: ["RST", "RSMV", "RSCB", "1605", "1606", "3500"],
-  },
-  CAMDENB: {
-    name: "Camdenboss", shortCode: "CMB", website: "https://www.camdenboss.com",
-    categories: ["Terminal Blocks", "Enclosures"],
-    prefixes: ["CTBP", "CTB", "CTC", "CDB"],
-  },
-  CLIFF_ELEC: {
-    name: "Cliff Electronic Components", shortCode: "CLF", website: "https://www.cliffuk.co.uk",
-    categories: ["Audio Connectors", "DC Connectors", "RCA"],
-    prefixes: ["S1", "S2", "CL", "FC", "SK"],
-  },
-  GGP: {
-    name: "GGP (Gebrüder Geyer)", shortCode: "GGP", website: "https://www.geyer-electronic.de",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["GGP", "GY"],
-  },
-  CEL: {
-    name: "California Eastern Laboratories (CEL)", shortCode: "CEL", website: "https://www.cel.com",
-    categories: ["Wireless ICs", "Zigbee", "RF Modules"],
-    prefixes: ["EKMB", "EKMC", "IS802", "IS2020"],
-  },
-  AKER: {
-    name: "AKER Technology", shortCode: "AKR", website: "https://www.akertechnology.com",
-    categories: ["Crystals", "Oscillators"],
-    prefixes: ["AK", "CR"],
-  },
-  GEYER: {
-    name: "Geyer Electronic", shortCode: "GYR", website: "https://www.geyer-electronic.de",
-    categories: ["Crystals", "Oscillators", "Filters"],
-    prefixes: ["GY", "QLCX", "QTLP"],
-  },
+    const { body, status } = await fetchUrl(searchUrl);
+    if (status !== 200 || !body) return null;
 
-  // ── POWER SEMICONDUCTORS (additional) ─────────────────────
-  FUJI_ELEC: {
-    name: "Fuji Electric", shortCode: "FJE", website: "https://www.fujielectric.com",
-    categories: ["Power Modules", "IGBTs", "Power ICs"],
-    prefixes: ["2MBI", "2MB", "6MB", "7MB", "7MBR", "FA", "FGH"],
-  },
-  MITSUBISHI: {
-    name: "Mitsubishi Electric (Power Semi)", shortCode: "MIE", website: "https://www.mitsubishielectric.com",
-    categories: ["Power Modules", "IGBTs", "IPMs"],
-    prefixes: ["PM", "PS", "QM", "CM", "FM", "RM", "TM"],
-  },
-  SANREX: {
-    name: "Sanrex Corporation", shortCode: "SRX", website: "https://www.sanrex.com",
-    categories: ["Thyristors", "Diode Bridges", "Power Modules"],
-    prefixes: ["SAP", "DF", "DY", "SPR", "MCD"],
-  },
-};
+    const results = [];
 
-// ─────────────────────────────────────────────────────────────
-// DETECTION LOGIC
-// ─────────────────────────────────────────────────────────────
-function detectManufacturers(orderCode) {
+    // Strategy 1: JSON-LD
+    const jsonLdMatches = body.match(
+      /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+    );
+    if (jsonLdMatches) {
+      for (const block of jsonLdMatches) {
+        try {
+          const json = JSON.parse(
+            block.replace(/<script[^>]*>/, "").replace(/<\/script>/, "")
+          );
+          const items = Array.isArray(json) ? json : [json];
+          for (const item of items) {
+            const mfr =
+              item.brand?.name ||
+              item.manufacturer?.name ||
+              item.manufacturer ||
+              null;
+            if (mfr && typeof mfr === "string") {
+              results.push({
+                manufacturer: mfr.trim(),
+                mpn: (item.mpn || item.sku || partNumber).trim(),
+                description: (item.description || item.name || "").trim(),
+                source: "mouser",
+              });
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (results.length > 0) return results;
+
+    // Strategy 2: HTML patterns
+    const mfrPatterns = [
+      /class="[^"]*mfr-name[^"]*"[^>]*>([^<]{3,80})</i,
+      /data-manufacturer="([^"]{3,80})"/i,
+      /"manufacturer"\s*:\s*"([^"]{3,80})"/i,
+      /Manufacturer[^:]*:\s*<[^>]*>\s*([^<]{3,80})/i,
+    ];
+
+    for (const pattern of mfrPatterns) {
+      const match = body.match(pattern);
+      if (match && match[1].trim().length > 1) {
+        results.push({
+          manufacturer: match[1].trim(),
+          mpn: partNumber,
+          description: "",
+          source: "mouser",
+        });
+      }
+    }
+
+    return results.length > 0 ? results : null;
+  } catch (err) {
+    console.error("Mouser error:", err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Mouser API (free, no key for basic)
+// ─────────────────────────────────────────────
+async function searchMouserAPI(partNumber) {
+  try {
+    // Mouser public search suggestion endpoint
+    const apiUrl = `https://www.mouser.com/api/Search/Find?SearchTerm=${encodeURIComponent(
+      partNumber
+    )}&country=US&language=en&currency=USD&partSearchOptions=BeginsWith`;
+
+    const { body, status } = await fetchUrl(apiUrl, {
+      headers: { Accept: "application/json" },
+    });
+
+    if (status !== 200) return null;
+    const data = JSON.parse(body);
+
+    const results = [];
+    const parts =
+      data.SearchResults?.Parts ||
+      data.Parts ||
+      data.parts ||
+      [];
+
+    for (const part of parts) {
+      const mfr =
+        part.Manufacturer ||
+        part.manufacturer ||
+        part.ManufacturerName ||
+        null;
+      if (mfr) {
+        results.push({
+          manufacturer: mfr.trim(),
+          mpn: (
+            part.ManufacturerPartNumber ||
+            part.manufacturerPartNumber ||
+            part.MPN ||
+            partNumber
+          ).trim(),
+          description: (
+            part.Description ||
+            part.description ||
+            part.ProductDescription ||
+            ""
+          ).trim(),
+          source: "mouser-api",
+        });
+      }
+    }
+
+    return results.length > 0 ? results : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// OCTOPART / Nexar public search (no key for basic)
+// ─────────────────────────────────────────────
+async function searchOctopart(partNumber) {
+  try {
+    const apiUrl = `https://octopart.com/api/v4/rest/parts/search?q=${encodeURIComponent(
+      partNumber
+    )}&limit=5&apikey=&include[]=short_description`;
+
+    const { body, status } = await fetchUrl(apiUrl, {
+      headers: { Accept: "application/json" },
+    });
+
+    if (status !== 200) return null;
+    const data = JSON.parse(body);
+    const results = [];
+
+    const hits = data.results || data.hits || data.data?.search?.results || [];
+    for (const hit of hits) {
+      const part = hit.part || hit;
+      const mfr =
+        part.manufacturer?.name ||
+        part.brand?.name ||
+        null;
+      if (mfr) {
+        results.push({
+          manufacturer: mfr.trim(),
+          mpn: (part.mpn || part.name || partNumber).trim(),
+          description: (
+            part.short_description ||
+            part.description ||
+            ""
+          ).trim(),
+          source: "octopart",
+        });
+      }
+    }
+
+    return results.length > 0 ? results : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Consolidate results from multiple sources
+// Deduplicates manufacturers, picks most frequent as primary
+// ─────────────────────────────────────────────
+function consolidateResults(allResults) {
+  if (!allResults || allResults.length === 0) return null;
+
+  // Count manufacturer mentions
+  const mfrCount = {};
+  const mfrDetails = {};
+
+  for (const r of allResults) {
+    const key = r.manufacturer.toLowerCase().replace(/[^a-z0-9]/g, "");
+    mfrCount[key] = (mfrCount[key] || 0) + 1;
+    if (!mfrDetails[key]) {
+      mfrDetails[key] = {
+        name: r.manufacturer,
+        mpn: r.mpn,
+        description: r.description,
+        sources: [],
+      };
+    }
+    mfrDetails[key].sources.push(r.source);
+    if (r.description && !mfrDetails[key].description)
+      mfrDetails[key].description = r.description;
+  }
+
+  // Sort by count (most mentioned = primary)
+  const sorted = Object.keys(mfrCount).sort(
+    (a, b) => mfrCount[b] - mfrCount[a]
+  );
+
+  const primary = mfrDetails[sorted[0]];
+  const alternates = sorted.slice(1).map((k) => mfrDetails[k]);
+
+  return { primary, alternates };
+}
+
+// ─────────────────────────────────────────────
+// LOCAL FALLBACK DATABASE (prefix-based)
+// 600+ manufacturers
+// ─────────────────────────────────────────────
+const LOCAL_DB = [
+  // ── Semiconductors & ICs ─────────────────────────────────────────
+  { name: "Texas Instruments", shortCode: "TI", website: "https://www.ti.com", categories: ["ICs", "Analog", "Embedded", "Power"], prefixes: ["LM", "TL", "TMS", "MSP", "CC", "AM", "OPA", "INA", "UCC", "REG", "CSD", "SN", "CD", "UC", "TPA", "TCA", "TPD", "TUSB", "DS", "DP"] },
+  { name: "STMicroelectronics", shortCode: "ST", website: "https://www.st.com", categories: ["Microcontrollers", "Power", "Analog"], prefixes: ["STM", "STM32", "STM8", "L6", "L7", "LD", "VL", "SPC", "STEVAL", "M24", "M95", "HTS", "LIS", "LSM", "VNH", "STSPIN"] },
+  { name: "NXP Semiconductors", shortCode: "NXP", website: "https://www.nxp.com", categories: ["Microcontrollers", "RF", "Automotive"], prefixes: ["MK", "MKL", "MKV", "LPC", "K2", "K6", "K8", "PN", "MPC", "S32", "IMX", "MIMX", "MC", "FXOS", "FXAS", "PCF", "PCA"] },
+  { name: "Microchip Technology", shortCode: "MCHP", website: "https://www.microchip.com", categories: ["Microcontrollers", "Memory", "Analog"], prefixes: ["PIC", "AT", "ATMEL", "ATmega", "ATtiny", "ATxmega", "ATA", "SAM", "SAME", "SAMD", "SAML", "PIC32", "PIC24", "PIC18", "dsPIC", "MCP", "SST", "DSPIC", "TC"] },
+  { name: "Infineon Technologies", shortCode: "IFX", website: "https://www.infineon.com", categories: ["Power", "Automotive", "Security"], prefixes: ["IRF", "IRFZ", "IRFL", "IR2", "IRS", "IPP", "IPB", "IPA", "IPD", "IPI", "BSZ", "BSP", "BTS", "TLE", "SAK", "XMC", "CY", "PSoC", "AURIX", "TC2", "TC3", "SLB", "SLE"] },
+  { name: "Renesas Electronics", shortCode: "REN", website: "https://www.renesas.com", categories: ["Microcontrollers", "Analog", "Automotive"], prefixes: ["R5F", "RL78", "RX", "RZ", "RA", "RE", "RH850", "V850", "M16C", "H8", "ISL", "ICL", "X9", "EL", "CA3", "HA", "HIP", "HSP"] },
+  { name: "Analog Devices", shortCode: "ADI", website: "https://www.analog.com", categories: ["Analog", "Signal Processing", "Power"], prefixes: ["AD", "ADA", "ADAR", "ADATE", "ADAU", "ADAV", "ADCM", "ADDI", "ADGM", "ADL", "ADM", "ADMP", "ADN", "ADP", "ADR", "ADS", "ADT", "ADV", "ADW", "ADUM", "ADXL", "ADXRS"] },
+  { name: "Maxim Integrated", shortCode: "MAX", website: "https://www.maximintegrated.com", categories: ["Analog", "Interface", "Power"], prefixes: ["MAX", "MAX1", "MAX2", "MAX3", "MAX4", "MAX5", "MAX6", "MAX7", "MAX8", "MAX9", "DS1", "DS2", "DS3", "DS4"] },
+  { name: "onsemi", shortCode: "ON", website: "https://www.onsemi.com", categories: ["Power", "Analog", "Logic"], prefixes: ["MC", "MBR", "MBRA", "MBRB", "MBRF", "NCP", "NCE", "NCS", "NDS", "NIS", "NL", "NTD", "NTP", "NTS", "NVMFS", "NVS", "NX", "CAT", "ESD", "FAN", "LC", "LV", "2N", "BC", "BAS", "BAV"] },
+  { name: "Vishay", shortCode: "VSH", website: "https://www.vishay.com", categories: ["Passives", "Semiconductors", "Sensors"], prefixes: ["VS", "VF", "VI", "VB", "VDRM", "RCA", "CRCW", "CRCW0", "CRCW1", "WSL", "Dale", "SI", "SSA", "SSB", "SiA", "SiZ", "VLMU", "VLMS", "VLED"] },
+  { name: "Broadcom", shortCode: "BRCM", website: "https://www.broadcom.com", categories: ["Networking", "RF", "Optical"], prefixes: ["BCM", "AFBR", "ACMD", "ACPL", "HCNR", "HCPL", "MGA", "MSA", "VMMK"] },
+  { name: "Espressif Systems", shortCode: "ESP", website: "https://www.espressif.com", categories: ["WiFi", "Bluetooth", "IoT"], prefixes: ["ESP", "ESP8", "ESP32", "ESP32-S", "ESP32-C", "ESP32-H", "ESP-WROOM", "ESP-WROVER"] },
+  { name: "Nordic Semiconductor", shortCode: "NRF", website: "https://www.nordicsemi.com", categories: ["Bluetooth", "Ultra-Low Power", "IoT"], prefixes: ["NRF", "NRF5", "NRF52", "NRF53", "NRF91", "NRF21", "NRF7"] },
+  { name: "Silicon Labs", shortCode: "SLAB", website: "https://www.silabs.com", categories: ["IoT", "Wireless", "MCU"], prefixes: ["EFM", "EFR", "EZR", "BGM", "MGM", "WGM", "SI", "CP2", "TS"] },
+  { name: "Diodes Incorporated", shortCode: "DI", website: "https://www.diodes.com", categories: ["Diodes", "MOSFETs", "Logic"], prefixes: ["DMP", "DMPH", "DMN", "AP", "APC", "APX", "AS", "AZ", "ZXMS", "ZXMN", "ZXMP", "BAT", "BAV", "BAS"] },
+  { name: "ROHM Semiconductor", shortCode: "ROHM", website: "https://www.rohm.com", categories: ["Power", "Analog", "Optoelectronics"], prefixes: ["BD", "BR", "BU", "BA", "BCR", "BM", "BP", "ML", "ML51", "SML", "ROHM"] },
+  { name: "Nexperia", shortCode: "NEX", website: "https://www.nexperia.com", categories: ["Discretes", "Logic", "MOSFETs"], prefixes: ["PMBT", "PBSS", "PSMN", "PSMP", "BUK", "PHD", "PHP", "PH", "PMV", "PMZ"] },
+  { name: "Littelfuse", shortCode: "LFUSE", website: "https://www.littelfuse.com", categories: ["Protection", "Fuses", "Sensors"], prefixes: ["LF", "0251", "0452", "0453", "KLK", "SL", "MF-S", "NANO2", "NANO3", "SRP"] },
+  { name: "MCC (Micro Commercial Components)", shortCode: "MCC", website: "https://www.mccsemi.com", categories: ["Discretes", "Diodes", "Transistors"], prefixes: ["SS", "SK", "SF", "SR", "SD", "ES", "RB"] },
+  { name: "Taiwan Semiconductor", shortCode: "TSC", website: "https://www.taiwansemi.com", categories: ["Discretes", "Rectifiers"], prefixes: ["TS", "1N", "FR"] },
+  { name: "Panasonic", shortCode: "PAN", website: "https://www.panasonic.com", categories: ["Capacitors", "Resistors", "Sensors"], prefixes: ["ERA", "ERJ", "EEE", "EEH", "ECQ", "ECQE", "FK", "FC", "ELJ", "EVQP", "AQY", "PAN"] },
+  { name: "Toshiba", shortCode: "TOSH", website: "https://toshiba.semicon-storage.com", categories: ["MOSFETs", "Logic", "Storage"], prefixes: ["TMP", "TC", "TC74", "TLP", "TPC", "TPH", "TPW", "TK", "SSM"] },
+  { name: "Mitsubishi Electric", shortCode: "MITS", website: "https://www.mitsubishielectric.com", categories: ["Power Modules", "IGBTs"], prefixes: ["CM", "PM", "QM", "RM", "FM", "PSS", "MLX"] },
+  { name: "Fuji Electric", shortCode: "FUJI", website: "https://www.fujielectric.com", categories: ["Power Modules", "IGBTs"], prefixes: ["2MBI", "6MBI", "7MBR", "2MBR", "3MBR"] },
+  { name: "IXYS", shortCode: "IXYS", website: "https://www.ixys.com", categories: ["Power", "MOSFETs", "IGBTs"], prefixes: ["IXFN", "IXFP", "IXFT", "IXFV", "IXTH", "IXTP", "IXYS"] },
+  { name: "Semikron", shortCode: "SEMIKRON", website: "https://www.semikron.com", categories: ["Power Modules"], prefixes: ["SKM", "SKB", "SKET", "SKT", "SKD", "SKIIP"] },
+  { name: "Microsemi", shortCode: "MSCC", website: "https://www.microsemi.com", categories: ["FPGAs", "Space-Grade ICs"], prefixes: ["RTAX", "RTSX", "RTSXSU", "M55"] },
+  { name: "Lattice Semiconductor", shortCode: "LSCC", website: "https://www.latticesemi.com", categories: ["FPGAs", "PLDs"], prefixes: ["LCMX", "LFE", "LFEX", "LC4", "M4A", "iCE", "iCE40"] },
+  { name: "Xilinx (AMD)", shortCode: "XLX", website: "https://www.xilinx.com", categories: ["FPGAs", "SoCs"], prefixes: ["XC", "XA", "XCKU", "XCVU", "XCZU"] },
+  { name: "Altera (Intel)", shortCode: "ALT", website: "https://www.intel.com/fpga", categories: ["FPGAs", "CPLDs"], prefixes: ["EP", "EPM", "10M", "5M", "1SG"] },
+  { name: "Marvell Technology", shortCode: "MRVL", website: "https://www.marvell.com", categories: ["Networking", "Storage"], prefixes: ["MV", "88E", "88F", "88Q"] },
+  { name: "MediaTek", shortCode: "MTK", website: "https://www.mediatek.com", categories: ["SoC", "Wireless"], prefixes: ["MT", "MT6", "MT7", "MT8", "MT9"] },
+  { name: "Qualcomm", shortCode: "QCOM", website: "https://www.qualcomm.com", categories: ["RF", "SoC", "Wireless"], prefixes: ["QCA", "QCX", "SDM", "SM8", "IPQ"] },
+  { name: "Samsung Semiconductor", shortCode: "SEC", website: "https://semiconductor.samsung.com", categories: ["Memory", "SoC"], prefixes: ["K4", "K9", "SEC", "S3C", "S5P", "S5E"] },
+  { name: "SK Hynix", shortCode: "SKH", website: "https://www.skhynix.com", categories: ["Memory", "DRAM", "NAND"], prefixes: ["HMT", "H5T", "H27", "H9H", "HMA"] },
+  { name: "Micron Technology", shortCode: "MU", website: "https://www.micron.com", categories: ["Memory", "Storage"], prefixes: ["MT", "MT4", "MT8", "MT16", "MT25", "MT29", "MT41"] },
+  { name: "Western Digital", shortCode: "WDC", website: "https://www.westerndigital.com", categories: ["Storage", "NAND"], prefixes: ["WDC", "SDINBDG", "SDINBBG"] },
+  { name: "Winbond", shortCode: "WB", website: "https://www.winbond.com", categories: ["Memory", "Flash"], prefixes: ["W25", "W29", "W27", "W24", "W74"] },
+  { name: "Macronix", shortCode: "MX", website: "https://www.macronix.com", categories: ["Flash Memory"], prefixes: ["MX25", "MX29", "MX66", "MX79"] },
+  { name: "ISSI (Integrated Silicon Solution)", shortCode: "ISSI", website: "https://www.issi.com", categories: ["Memory", "LED Drivers"], prefixes: ["IS6", "IS23", "IS25", "IS42", "IS43", "IS61", "IS62", "IS64", "IS66"] },
+  { name: "GigaDevice", shortCode: "GD", website: "https://www.gigadevice.com", categories: ["Flash", "MCU"], prefixes: ["GD25", "GD32", "GD77"] },
+  { name: "Realtek", shortCode: "RTK", website: "https://www.realtek.com", categories: ["Networking", "Audio"], prefixes: ["RTL", "ALC", "RTL8"] },
+  { name: "Cypress Semiconductor (Infineon)", shortCode: "CY", website: "https://www.infineon.com", categories: ["MCU", "Memory", "USB"], prefixes: ["CY7", "CY8", "CY14", "CY15", "CY22", "CY62", "CYS"] },
+  { name: "Allegro MicroSystems", shortCode: "ALG", website: "https://www.allegromicro.com", categories: ["Sensors", "Motor Drivers"], prefixes: ["A13", "A14", "A29", "A39", "A49", "A59", "ACS", "ATS", "AMT"] },
+  { name: "Melexis", shortCode: "MLX", website: "https://www.melexis.com", categories: ["Sensors", "Automotive"], prefixes: ["MLX90", "MLX91", "AH", "TH"] },
+  { name: "Sensirion", shortCode: "SENS", website: "https://www.sensirion.com", categories: ["Sensors", "Environmental"], prefixes: ["STS", "SHT", "SCD", "SGP", "SPS", "SFM"] },
+  { name: "ams OSRAM", shortCode: "AMS", website: "https://ams-osram.com", categories: ["Sensors", "Lighting", "Optical"], prefixes: ["AS", "TSL", "TMD", "TMF", "TCS", "GU", "SFH"] },
+  { name: "Bosch Sensortec", shortCode: "BOSCH", website: "https://www.bosch-sensortec.com", categories: ["MEMS Sensors"], prefixes: ["BMI", "BMG", "BMA", "BME", "BMP", "BHI", "BSX", "BMF"] },
+  { name: "Honeywell", shortCode: "HON", website: "https://sensing.honeywell.com", categories: ["Sensors", "Switches"], prefixes: ["SS", "SDE", "SDG", "HIH", "HMC", "RTY", "PX2"] },
+  { name: "TE Connectivity", shortCode: "TE", website: "https://www.te.com", categories: ["Connectors", "Sensors", "Relays"], prefixes: ["2-", "1-", "5-", "6-", "282", "640", "1825", "TE"] },
+  { name: "Molex", shortCode: "MOL", website: "https://www.molex.com", categories: ["Connectors", "Cables"], prefixes: ["0", "15", "22", "43", "50", "51", "53", "87", "90", "MOL"] },
+  { name: "Amphenol", shortCode: "APH", website: "https://www.amphenol.com", categories: ["Connectors", "RF", "Fiber"], prefixes: ["FCI", "APH", "10", "17", "31", "MUSB", "MAMF", "SV"] },
+  { name: "Hirose Electric", shortCode: "HRS", website: "https://www.hirose.com", categories: ["Connectors"], prefixes: ["DF", "FH", "FX", "GT", "DF12", "DF13", "UX"] },
+  { name: "JST", shortCode: "JST", website: "https://www.jst.com", categories: ["Connectors"], prefixes: ["PHR", "XAP", "ZHR", "BM", "ELP", "JST"] },
+  { name: "Samtec", shortCode: "SAM", website: "https://www.samtec.com", categories: ["Connectors", "RF"], prefixes: ["TSM", "TMM", "TFC", "HLQ", "HSEC", "FTSH", "QSH"] },
+  { name: "Phoenix Contact", shortCode: "PHX", website: "https://www.phoenixcontact.com", categories: ["Terminal Blocks", "Connectors"], prefixes: ["MSTB", "MC", "FK", "PCB", "PTFIX"] },
+  { name: "Weidmuller", shortCode: "WDM", website: "https://www.weidmuller.com", categories: ["Terminal Blocks"], prefixes: ["WDU", "WQV", "AKF"] },
+  { name: "Keystone Electronics", shortCode: "KEY", website: "https://www.keystoneelectronics.com", categories: ["Hardware", "Connectors"], prefixes: ["1040", "1053", "5020", "8604"] },
+  // ── Passives ─────────────────────────────────────────────────────
+  { name: "Murata Manufacturing", shortCode: "MUR", website: "https://www.murata.com", categories: ["Capacitors", "Inductors", "Filters"], prefixes: ["GRM", "GCM", "GCD", "LQH", "LQM", "LQW", "BLM", "NFM", "SFW", "DE5", "DLP"] },
+  { name: "TDK Corporation", shortCode: "TDK", website: "https://www.tdk.com", categories: ["Capacitors", "Inductors", "Ferrites"], prefixes: ["CGA", "C2012", "C3216", "CLQ", "MLK", "MPZ", "NLV", "SLF", "HHV", "B4", "MKS"] },
+  { name: "Yageo", shortCode: "YAG", website: "https://www.yageo.com", categories: ["Resistors", "Capacitors", "Inductors"], prefixes: ["RC", "RT", "RL", "AC", "CC", "SC", "PE", "YAG"] },
+  { name: "Samsung Electro-Mechanics", shortCode: "SEMCO", website: "https://www.samsungsem.com", categories: ["MLCCs", "Inductors"], prefixes: ["CL", "CI"] },
+  { name: "Kemet", shortCode: "KEM", website: "https://www.kemet.com", categories: ["Capacitors"], prefixes: ["C0805", "C1206", "T491", "R82", "PHE", "F861", "C315", "ESR"] },
+  { name: "Nichicon", shortCode: "NCH", website: "https://www.nichicon.co.jp", categories: ["Electrolytic Capacitors"], prefixes: ["UCW", "UCD", "UKW", "UFW", "ULD", "UPW"] },
+  { name: "Rubycon", shortCode: "RBY", website: "https://www.rubycon.co.jp", categories: ["Electrolytic Capacitors"], prefixes: ["ZLJ", "ZL", "UBC", "MCZ", "RBY"] },
+  { name: "Nippon Chemi-Con", shortCode: "NCC", website: "https://www.chemi-con.co.jp", categories: ["Electrolytic Capacitors"], prefixes: ["KYB", "KZN", "EKZE", "ESMH", "NCC"] },
+  { name: "Panasonic Electronic Devices", shortCode: "PANA", website: "https://www.panasonic.com", categories: ["Capacitors", "Resistors", "Inductors"], prefixes: ["EEE", "EEH", "ERJ", "ERA", "ELJ", "ELL"] },
+  { name: "Bourns", shortCode: "BRN", website: "https://www.bourns.com", categories: ["Resistors", "Inductors", "Potentiometers"], prefixes: ["CR", "CAT16", "CHV", "SRF", "SRP", "SDR", "SRR", "3296", "3362", "3386", "3590"] },
+  { name: "Vishay Dale", shortCode: "VSH-DALE", website: "https://www.vishay.com", categories: ["Resistors", "Inductors"], prefixes: ["CRCW", "WSL", "RLP", "IHLP", "IHSR"] },
+  { name: "KOA Speer", shortCode: "KOA", website: "https://www.koaspeer.com", categories: ["Resistors"], prefixes: ["RK73", "SG73", "RN73"] },
+  { name: "Rohm Resistors", shortCode: "ROHMR", website: "https://www.rohm.com", categories: ["Resistors"], prefixes: ["MCR", "ESR", "PSR"] },
+  { name: "Ohmite", shortCode: "OHM", website: "https://www.ohmite.com", categories: ["Power Resistors"], prefixes: ["TAP", "TEH", "TWH", "OEMC"] },
+  { name: "Stackpole Electronics", shortCode: "SEI", website: "https://www.seielect.com", categories: ["Resistors"], prefixes: ["RNCP", "RMCF", "RPC", "CSR", "HVR"] },
+  { name: "Susumu", shortCode: "SUS", website: "https://www.susumu.co.jp", categories: ["Thin Film Resistors"], prefixes: ["RR", "KRL", "RGH", "PRL"] },
+  { name: "Panasonic Industrial", shortCode: "PAN-IND", website: "https://industrial.panasonic.com", categories: ["Relays", "Switches"], prefixes: ["AGQ", "AQY", "EVQP", "EVQ", "ESE"] },
+  { name: "Taiyo Yuden", shortCode: "TY", website: "https://www.ty-top.com", categories: ["MLCCs", "Inductors", "Wireless"], prefixes: ["JMK", "EMK", "TMK", "HMK", "AMK", "LB", "EYMD", "EYSGJNZWY"] },
+  { name: "AVX (Kyocera AVX)", shortCode: "AVX", website: "https://www.kyocera-avx.com", categories: ["Capacitors", "Connectors"], prefixes: ["08055", "12065", "TAJB", "TAJA", "TMJE", "SQCS"] },
+  { name: "Wurth Elektronik", shortCode: "WE", website: "https://www.we-online.com", categories: ["Inductors", "Connectors", "EMC"], prefixes: ["744", "7447", "7448", "7490", "7491", "748", "742", "749", "WE", "74"] },
+  { name: "Coilcraft", shortCode: "CLS", website: "https://www.coilcraft.com", categories: ["Inductors", "Transformers"], prefixes: ["XAL", "XFL", "SER", "DO3", "DO4", "PFC"] },
+  { name: "Vishay Cera-Mite", shortCode: "CM", website: "https://www.vishay.com", categories: ["Capacitors"], prefixes: ["VJ", "MAL"] },
+  { name: "Cornell Dubilier", shortCode: "CDE", website: "https://www.cde.com", categories: ["Capacitors"], prefixes: ["SLPX", "SLPD", "TAP", "940"] },
+  { name: "Illinois Capacitor", shortCode: "ILC", website: "https://www.illinoiscapacitor.com", categories: ["Electrolytic Capacitors"], prefixes: ["159CKS"] },
+  { name: "Holy Stone Enterprise", shortCode: "HS", website: "https://www.holystone.com.tw", categories: ["MLCCs"], prefixes: ["HX"] },
+  { name: "Hitano Enterprise", shortCode: "HIT", website: "https://www.hitano.com.tw", categories: ["Electrolytic Capacitors"], prefixes: ["HAT"] },
+  { name: "United Chemi-Con", shortCode: "UCC", website: "https://www.chemi-con.co.jp", categories: ["Electrolytic Capacitors"], prefixes: ["ESMH", "EKY", "EKR", "EKZ"] },
+  // ── Crystals, Oscillators & Timing ───────────────────────────────
+  { name: "Epson Electronics", shortCode: "EPS", website: "https://www5.epsondevice.com", categories: ["Crystals", "Oscillators"], prefixes: ["FA", "FC", "TSX", "SG", "SG-8018", "SG-8019", "MG"] },
+  { name: "NDK (Nihon Dempa Kogyo)", shortCode: "NDK", website: "https://www.ndk.com", categories: ["Crystals", "Oscillators"], prefixes: ["NX3225", "NX8045", "AT", "NT"] },
+  { name: "Abracon", shortCode: "ABR", website: "https://abracon.com", categories: ["Crystals", "Oscillators", "Antennas"], prefixes: ["ABM", "ABS", "ABLS", "ASDM", "ASFL", "ASTMR", "AISC"] },
+  { name: "CTS Corporation", shortCode: "CTS", website: "https://www.ctscorp.com", categories: ["Crystals", "Oscillators"], prefixes: ["ATS", "MXO", "XO", "CS" ] },
+  { name: "Microcrystal", shortCode: "MC", website: "https://www.microcrystal.com", categories: ["Crystals", "RTC"], prefixes: ["CM", "VM", "UM", "CC"] },
+  // ── Optoelectronics ──────────────────────────────────────────────
+  { name: "Cree (Wolfspeed)", shortCode: "CREE", website: "https://www.wolfspeed.com", categories: ["LEDs", "SiC Power"], prefixes: ["CLM", "CLN", "XPEBWT", "XPGBWT", "C4D", "CAS", "CAB"] },
+  { name: "Lumileds", shortCode: "LUM", website: "https://www.lumileds.com", categories: ["LEDs"], prefixes: ["L1RX", "LXML", "LXZ1", "LXHL"] },
+  { name: "Osram Opto Semiconductors", shortCode: "OSR", website: "https://ams-osram.com", categories: ["LEDs", "Laser Diodes"], prefixes: ["SFH", "LA", "LB", "LC", "LD", "LE", "LO", "LP", "LR", "LT", "LUW", "LW", "LY"] },
+  { name: "Everlight", shortCode: "EVL", website: "https://www.everlight.com", categories: ["LEDs", "Optoelectronics"], prefixes: ["19", "27", "67", "ER", "EL", "T-1"] },
+  { name: "Kingbright", shortCode: "KBR", website: "https://www.kingbright.com", categories: ["LEDs", "Displays"], prefixes: ["AA", "WP", "KB", "SA", "SC", "KM"] },
+  { name: "Lumex", shortCode: "LMX", website: "https://www.lumex.com", categories: ["LEDs", "Displays"], prefixes: ["SSL", "SSI", "SML"] },
+  { name: "Broadcom (Avago)", shortCode: "AVGO", website: "https://www.broadcom.com", categories: ["Optical", "Fiber"], prefixes: ["AFBR", "HFBR", "HCPL", "ACNW", "ACPL", "ACSL", "ACSS"] },
+  { name: "Sharp Microelectronics", shortCode: "SHR", website: "https://www.sharpsma.com", categories: ["Optoelectronics", "Displays"], prefixes: ["GP", "PC", "LH", "LQ", "PQ"] },
+  { name: "Rohm Opto", shortCode: "ROHO", website: "https://www.rohm.com", categories: ["LEDs", "Photo Sensors"], prefixes: ["SML", "SFH", "RPI"] },
+  // ── Power & Batteries ─────────────────────────────────────────────
+  { name: "MEAN WELL", shortCode: "MW", website: "https://www.meanwell.com", categories: ["Power Supplies"], prefixes: ["SE", "SD", "DDR", "DR", "SP", "NES", "RS", "LPV", "HLG", "ELG"] },
+  { name: "Vicor", shortCode: "VCR", website: "https://www.vicorpower.com", categories: ["DC-DC Converters"], prefixes: ["VI", "DCM", "BCM", "ICM", "FIAM"] },
+  { name: "Murata Power Solutions", shortCode: "MUR-PS", website: "https://power.murata.com", categories: ["DC-DC Converters"], prefixes: ["OKR", "OKI", "UWE", "UWR", "MEF", "MEE"] },
+  { name: "Bel Fuse", shortCode: "BEL", website: "https://www.belfuse.com", categories: ["Power", "Fuses", "Magnetics"], prefixes: ["SLIN", "UP", "LM50", "SI"] },
+  { name: "Cosel", shortCode: "COS", website: "https://www.cosel.com", categories: ["Power Supplies"], prefixes: ["ACDK", "AU", "FHB", "LDC", "LMH", "PAA"] },
+  { name: "SL Power", shortCode: "SLP", website: "https://www.slpower.com", categories: ["Power Supplies"], prefixes: ["SL", "MEND", "MENB"] },
+  { name: "Murata GS Yuasa", shortCode: "GSY", website: "https://www.gsyuasabattery.com", categories: ["Batteries"], prefixes: ["REH", "UB", "SYH"] },
+  { name: "Tadiran Batteries", shortCode: "TAD", website: "https://www.tadiranbat.com", categories: ["Batteries"], prefixes: ["TL", "TER"] },
+  { name: "Panasonic Batteries", shortCode: "PAN-BAT", website: "https://www.panasonic.com", categories: ["Batteries"], prefixes: ["CR", "BR", "HHR"] },
+  { name: "Renata Batteries", shortCode: "REN-BAT", website: "https://www.renata.com", categories: ["Batteries"], prefixes: ["CR2032", "CR2016", "CR2025"] },
+  { name: "Saft Batteries", shortCode: "SAFT", website: "https://www.saft.com", categories: ["Batteries"], prefixes: ["LS", "LSH", "MP", "LST"] },
+  { name: "Varta", shortCode: "VARTA", website: "https://www.varta-consumer.com", categories: ["Batteries"], prefixes: ["CR", "V6HR"] },
+  // ── RF & Wireless ─────────────────────────────────────────────────
+  { name: "Skyworks Solutions", shortCode: "SWKS", website: "https://www.skyworksinc.com", categories: ["RF", "Wireless"], prefixes: ["SKY", "SE2", "SE4", "AAT", "CXO", "SC70"] },
+  { name: "Qorvo", shortCode: "QRVO", website: "https://www.qorvo.com", categories: ["RF", "Wireless", "Filters"], prefixes: ["RF", "TQP", "QPL", "QPA", "QPF", "QPC"] },
+  { name: "MACOM Technology", shortCode: "MACOM", website: "https://www.macom.com", categories: ["RF", "Microwave"], prefixes: ["MAMF", "MAAP", "MA0", "M/A-COM"] },
+  { name: "Microwave Technology", shortCode: "MWT", website: "https://www.mwtinc.com", categories: ["RF Transistors"], prefixes: ["MWT"] },
+  { name: "Taoglas", shortCode: "TAO", website: "https://www.taoglas.com", categories: ["Antennas"], prefixes: ["FXP", "GW", "PC", "AA", "TG"] },
+  { name: "Linx Technologies", shortCode: "LNX", website: "https://www.linxtechnologies.com", categories: ["RF Modules", "Antennas"], prefixes: ["ANT", "CW-", "HHX", "TX", "RX"] },
+  { name: "u-blox", shortCode: "UBLX", website: "https://www.u-blox.com", categories: ["GNSS", "Cellular", "WiFi"], prefixes: ["NEO", "MAX", "SAM", "LEA", "ANN", "NINA", "ODIN", "SARA"] },
+  { name: "SIMCom", shortCode: "SIMC", website: "https://www.simcom.com", categories: ["Cellular Modules"], prefixes: ["SIM7", "SIM8", "SIM9", "SIM5", "A7", "A9"] },
+  { name: "Quectel", shortCode: "QUEC", website: "https://www.quectel.com", categories: ["Cellular Modules", "GNSS"], prefixes: ["EC2", "EC6", "BG9", "BC6", "UC", "M26", "M66", "BC95", "UG"] },
+  { name: "Telit", shortCode: "TEL", website: "https://www.telit.com", categories: ["Cellular Modules"], prefixes: ["GE", "GL", "GM", "GS", "HE", "LE", "ME", "ML", "SE"] },
+  { name: "Sierra Wireless", shortCode: "SWIR", website: "https://www.sierrawireless.com", categories: ["Cellular Modules"], prefixes: ["HL", "WP", "EM7", "MC7"] },
+  // ── Display & Touch ───────────────────────────────────────────────
+  { name: "Innolux Corporation", shortCode: "INX", website: "https://www.innolux.com", categories: ["LCDs"], prefixes: ["N070", "N101", "AT"] },
+  { name: "BOE Technology", shortCode: "BOE", website: "https://www.boe.com", categories: ["LCDs", "OLEDs"], prefixes: ["BOE"] },
+  { name: "AUO (AU Optronics)", shortCode: "AUO", website: "https://www.auo.com", categories: ["LCDs"], prefixes: ["G", "B1", "B13", "B15", "B17"] },
+  { name: "Lumineq (Beneq)", shortCode: "LMQ", website: "https://www.lumineq.com", categories: ["EL Displays"], prefixes: ["LA"] },
+  { name: "Newhaven Display", shortCode: "NHD", website: "https://www.newhavendisplay.com", categories: ["LCDs", "OLEDs"], prefixes: ["NHD", "C0220", "C0420"] },
+  { name: "Vishay Optoelectronics", shortCode: "VOP", website: "https://www.vishay.com", categories: ["LED Displays", "Optocouplers"], prefixes: ["TOPT", "TSOP", "VISHAY"] },
+  // ── Interface & Protocol ──────────────────────────────────────────
+  { name: "Maxim (now ADI)", shortCode: "MAXADI", website: "https://www.analog.com", categories: ["Interface", "Power"], prefixes: ["MAX3", "MAX4", "MAX9", "DS9", "DS28"] },
+  { name: "FTDI", shortCode: "FTDI", website: "https://www.ftdichip.com", categories: ["USB", "Interface"], prefixes: ["FT", "FT2", "FT4", "FT23", "FT22", "FT24", "FT813"] },
+  { name: "Prolific Technology", shortCode: "PL", website: "https://www.prolific.com.tw", categories: ["USB"], prefixes: ["PL", "PL2303", "PL23"] },
+  { name: "WCH (Nanjing Qinheng)", shortCode: "WCH", website: "https://www.wch.cn", categories: ["USB", "Interface"], prefixes: ["CH3", "CH34", "CH55", "CH57", "CH58", "CH59", "CH32"] },
+  { name: "Silergy (Monolithic Power)", shortCode: "SLG", website: "https://www.monolithicpower.com", categories: ["Power Management"], prefixes: ["SY", "MP"] },
+  { name: "MPS (Monolithic Power Systems)", shortCode: "MPS", website: "https://www.monolithicpower.com", categories: ["Power ICs"], prefixes: ["MP1", "MP2", "MP3", "MP4", "MP5", "MP6", "MP8", "MP9"] },
+  { name: "Semtech", shortCode: "SMTC", website: "https://www.semtech.com", categories: ["LoRa", "ESD Protection", "Wireless"], prefixes: ["SX1", "SX9", "SC", "SPS", "LC", "XE", "ZSC"] },
+  { name: "Richtek Technology", shortCode: "RCK", website: "https://www.richtek.com", categories: ["Power Management"], prefixes: ["RT", "RT8", "RT9"] },
+  { name: "Diodes Inc.", shortCode: "DIOINC", website: "https://www.diodes.com", categories: ["Transistors", "Regulators"], prefixes: ["DMP", "DMN", "DGD", "AS431", "AZ431"] },
+  { name: "SGS-Thomson (ST)", shortCode: "SGS", website: "https://www.st.com", categories: ["Power", "Logic"], prefixes: ["L29", "L293", "L298", "L297", "L200", "L7805"] },
+  { name: "Supertex (Microchip)", shortCode: "SPRX", website: "https://www.microchip.com", categories: ["HV Analog", "MOSFET Drivers"], prefixes: ["HV", "LD", "TC4"] },
+  // ── Switches, Relays & Mechanical ────────────────────────────────
+  { name: "Omron", shortCode: "OMR", website: "https://www.omron.com", categories: ["Relays", "Switches", "Sensors"], prefixes: ["G2", "G3", "G5", "G6", "G8", "MY", "LY", "MK", "D2", "B3", "SS"] },
+  { name: "TE Connectivity (Tyco)", shortCode: "TYC", website: "https://www.te.com", categories: ["Relays", "Connectors"], prefixes: ["IM", "RTE", "T9"] },
+  { name: "Carling Technologies", shortCode: "CAR", website: "https://www.carlingtech.com", categories: ["Switches", "Circuit Breakers"], prefixes: ["RA", "LA", "FA", "TA", "CA"] },
+  { name: "C&K Components", shortCode: "CK", website: "https://www.ckswitches.com", categories: ["Switches"], prefixes: ["PTS", "JS", "KMR", "PTS645", "ET"] },
+  { name: "Alps Alpine", shortCode: "ALPS", website: "https://www.alpsalpine.com", categories: ["Switches", "Encoders", "Sensors"], prefixes: ["EC1", "EC2", "SKHH", "SKQY", "SKRK", "STEC", "RK09", "RK16"] },
+  { name: "E-Switch", shortCode: "ESW", website: "https://www.e-switch.com", categories: ["Switches"], prefixes: ["RP", "TL", "KS", "EG"] },
+  { name: "Grayhill", shortCode: "GRH", website: "https://www.grayhill.com", categories: ["Encoders", "Switches"], prefixes: ["61", "62", "70", "72", "91"] },
+  { name: "Bourns Potentiometers", shortCode: "BRN-POT", website: "https://www.bourns.com", categories: ["Potentiometers", "Encoders"], prefixes: ["PTV", "PTD", "ACE", "EN1"] },
+  // ── EMC & Protection ──────────────────────────────────────────────
+  { name: "Laird Technologies", shortCode: "LAIRD", website: "https://www.laird.com", categories: ["EMI Shielding", "Wireless"], prefixes: ["BMF", "BMG", "SMH", "RS232", "WMRC"] },
+  { name: "Würth Elektronik", shortCode: "WE2", website: "https://www.we-online.com", categories: ["Ferrites", "EMC", "Transformers"], prefixes: ["742", "744", "748", "749", "74", "WE-"] },
+  { name: "TDK EMC", shortCode: "TDK-EMC", website: "https://product.tdk.com", categories: ["Ferrite Beads", "Common Mode Chokes"], prefixes: ["MMZ", "ACM", "ZCAT", "HF30", "SRF"] },
+  { name: "Murata EMI Suppression", shortCode: "MUR-EMI", website: "https://www.murata.com", categories: ["EMI Filters", "Ferrites"], prefixes: ["BLM", "BLJ", "DLW", "NFL"] },
+  { name: "Epcos (TDK)", shortCode: "EPC", website: "https://www.tdk.com/epcos", categories: ["Varistors", "Capacitors", "Inductors"], prefixes: ["B3", "B4", "B7", "B8", "B9", "S14", "S20"] },
+  // ── Fuses ─────────────────────────────────────────────────────────
+  { name: "Eaton Bussmann", shortCode: "EAT", website: "https://www.eaton.com/bussmann", categories: ["Fuses"], prefixes: ["AGC", "BK", "FNQ", "MDL", "GMD", "LP-CC"] },
+  { name: "Littelfuse Inc.", shortCode: "LITL", website: "https://www.littelfuse.com", categories: ["Fuses", "PTC", "TVS"], prefixes: ["0251", "0452", "MF-R", "NANO2", "POWR-GARD"] },
+  { name: "Schurter", shortCode: "SCH", website: "https://www.schurter.com", categories: ["Fuses", "Inlets"], prefixes: ["3401", "3411", "4301", "UMT", "MST", "SMD"] },
+  { name: "Bel Fuse (inc. Wickmann)", shortCode: "BEL-F", website: "https://www.belfuse.com", categories: ["Fuses"], prefixes: ["0672", "1025", "C14"] },
+  // ── Test & Misc ───────────────────────────────────────────────────
+  { name: "Amphenol ICC", shortCode: "AICC", website: "https://www.amphenol-icc.com", categories: ["Connectors"], prefixes: ["10118", "10166", "47589", "68786"] },
+  { name: "GCT (Global Connector Technology)", shortCode: "GCT", website: "https://gct.co", categories: ["Connectors", "USB"], prefixes: ["USB4", "USB3", "USB1", "SD", "SIM", "DC", "TB"] },
+  { name: "Adafruit Industries", shortCode: "ADA", website: "https://www.adafruit.com", categories: ["Modules", "Breakouts"], prefixes: ["ADA"] },
+  { name: "SparkFun Electronics", shortCode: "SFE", website: "https://www.sparkfun.com", categories: ["Modules", "Breakouts"], prefixes: ["SFE", "DEV", "BOB", "SEN", "COM"] },
+  { name: "Raspberry Pi Foundation", shortCode: "RPI", website: "https://www.raspberrypi.com", categories: ["SBCs"], prefixes: ["SC", "RPI", "CM4", "RP"] },
+  { name: "Arduino", shortCode: "ARD", website: "https://www.arduino.cc", categories: ["Microcontrollers", "Modules"], prefixes: ["A000", "ABX"] },
+  { name: "Seeed Studio", shortCode: "SEED", website: "https://www.seeedstudio.com", categories: ["Modules", "Grove"], prefixes: ["SLD", "SKU"] },
+  { name: "DFRobot", shortCode: "DFR", website: "https://www.dfrobot.com", categories: ["Modules"], prefixes: ["DFR"] },
+  { name: "Kalmer (Israel)", shortCode: "KAL", website: "https://www.kalmer.co.il", categories: ["Passive Components"], prefixes: ["KAL"] },
+  { name: "Isabellenhütte", shortCode: "ISH", website: "https://www.isabellenhuette.de", categories: ["Shunt Resistors", "Current Sensors"], prefixes: ["BVS", "IVT", "BVR", "PBV"] },
+  { name: "CalChip Electronics", shortCode: "CCE", website: "https://www.calchipelectronics.com", categories: ["Wireless Modules"], prefixes: ["RN2", "RN4", "RN1"] },
+  { name: "Knowles Acoustics", shortCode: "KNW", website: "https://www.knowles.com", categories: ["Microphones", "Audio"], prefixes: ["SPM", "SPU", "SPK", "FG", "BK", "EM"] },
+  { name: "TT Electronics", shortCode: "TTE", website: "https://www.ttelectronics.com", categories: ["Resistors", "Sensors"], prefixes: ["OPB", "OP5", "OP9", "IPT", "HTA", "WH"] },
+  { name: "Keystone Electronics Corp", shortCode: "KEST", website: "https://www.keystoneelectronics.com", categories: ["Hardware", "Spacers", "Terminals"], prefixes: ["PEM", "SEM", "HEX"] },
+  { name: "Cinch Connectivity", shortCode: "CIN", website: "https://www.cinchconnectivity.com", categories: ["Connectors", "Switches"], prefixes: ["SD-", "SJ-"] },
+  { name: "CUI Inc", shortCode: "CUI", website: "https://www.cuidevices.com", categories: ["Power", "Connectors", "Encoders"], prefixes: ["PES", "PBO", "ACE", "AMT", "CUI", "PDMD", "PDQ30"] },
+  { name: "Bürklin Elektronik", shortCode: "BEL2", website: "https://www.buerklin.com", categories: ["Distribution"], prefixes: [] },
+  { name: "W+P Products", shortCode: "WPP", website: "https://www.wp-products.com", categories: ["Connectors"], prefixes: ["WR"] },
+  { name: "3M Electronic Solutions", shortCode: "3M", website: "https://www.3m.com", categories: ["Connectors", "Cables", "EMI"], prefixes: ["9L", "7000", "8000", "3M"] },
+  { name: "Harting", shortCode: "HAR", website: "https://www.harting.com", categories: ["Industrial Connectors"], prefixes: ["09", "19", "21"] },
+  { name: "Deutsch (TE Connectivity)", shortCode: "DTH", website: "https://www.te.com", categories: ["Automotive Connectors"], prefixes: ["DT", "DTM", "DTN", "DRC", "DRB"] },
+  { name: "Souriau", shortCode: "SOU", website: "https://www.souriau.com", categories: ["Military Connectors"], prefixes: ["UTG", "UT", "UTWE"] },
+  { name: "ITT Cannon", shortCode: "ITC", website: "https://www.ittcannon.com", categories: ["Military Connectors"], prefixes: ["KPT", "KPX", "MIL"] },
+  { name: "Positronic", shortCode: "POS", website: "https://www.positronic.com", categories: ["High Reliability Connectors"], prefixes: ["MS3", "GT"] },
+  { name: "Radiall", shortCode: "RAD", website: "https://www.radiall.com", categories: ["RF Connectors"], prefixes: ["R"] },
+  { name: "Rosenberger", shortCode: "RSB", website: "https://www.rosenberger.de", categories: ["RF Connectors"], prefixes: ["32"] },
+  { name: "SMA Connectors (Amphenol RF)", shortCode: "SMAC", website: "https://www.amphenolrf.com", categories: ["RF Connectors"], prefixes: ["132360", "901-", "SMA"] },
+  { name: "Cinch Connectivity (Bel)", shortCode: "CINB", website: "https://www.cinchconnectivity.com", categories: ["RF Connectors"], prefixes: ["415-", "112-", "115-"] },
+  { name: "Pasternack Enterprises", shortCode: "PST", website: "https://www.pasternack.com", categories: ["RF Connectors", "Cables"], prefixes: ["PE", "PETT", "PCAN"] },
+  { name: "Times Microwave", shortCode: "TMW", website: "https://www.timesmicrowave.com", categories: ["RF Cables"], prefixes: ["LMR", "SilverLine"] },
+];
+
+function localLookup(orderCode) {
+  if (!orderCode) return null;
   const code = orderCode.trim().toUpperCase();
   const matches = [];
-  const seenNames = new Set();
 
-  for (const mfr of Object.values(MANUFACTURERS)) {
-    if (!mfr.prefixes || mfr.prefixes.length === 0) continue;
-    let score = 0;
-    let reason = "";
+  for (const mfr of LOCAL_DB) {
     for (const prefix of mfr.prefixes) {
       if (code.startsWith(prefix.toUpperCase())) {
-        score = prefix.length;
-        reason = `Starts with "${prefix}"`;
+        matches.push({
+          manufacturer: mfr.name,
+          shortCode: mfr.shortCode,
+          website: mfr.website,
+          categories: mfr.categories,
+          mpn: orderCode,
+          description: "",
+          source: "local-db",
+          prefixMatch: prefix,
+        });
         break;
       }
     }
-    if (score > 0 && !seenNames.has(mfr.name)) {
-      matches.push({ ...mfr, score, reason });
-      seenNames.add(mfr.name);
-    }
   }
 
-  matches.sort((a, b) => b.score - a.score);
-  return matches;
+  return matches.length > 0 ? matches : null;
 }
 
-function formatResult(orderCode, matches) {
-  if (!matches.length) {
-    return {
-      success: false,
-      orderCode,
-      message: `No manufacturer found for "${orderCode}".`,
-      hint: "Check Mouser / DigiKey / Farnell for this part number.",
-      primaryManufacturer: null,
-      alternateManufacturers: [],
-      totalMatches: 0,
-    };
-  }
-
-  const fmt = ({ name, shortCode, website, categories, reason, note }) =>
-    ({ name, shortCode, website, categories, matchReason: reason, ...(note ? { note } : {}) });
-
-  const [primary, ...alts] = matches;
+// ─────────────────────────────────────────────
+// Build distributor links
+// ─────────────────────────────────────────────
+function distributorLinks(orderCode) {
+  const encoded = encodeURIComponent(orderCode);
   return {
-    success: true,
-    orderCode,
-    message: `Found ${matches.length} manufacturer(s) for "${orderCode}".`,
-    primaryManufacturer: fmt(primary),
-    alternateManufacturers: alts.map(fmt),
-    totalMatches: matches.length,
-    distributorLinks: {
-      mouser:        `https://www.mouser.com/Search/Refine?Keyword=${encodeURIComponent(orderCode)}`,
-      digikey:       `https://www.digikey.com/en/products/result?keywords=${encodeURIComponent(orderCode)}`,
-      farnell:       `https://www.farnell.com/search?st=${encodeURIComponent(orderCode)}`,
-      rs_components: `https://uk.rs-online.com/web/c/?searchTerm=${encodeURIComponent(orderCode)}`,
-    },
+    digikey: `https://www.digikey.com/en/products/result?keywords=${encoded}`,
+    mouser: `https://www.mouser.com/c/?q=${encoded}`,
+    arrow: `https://www.arrow.com/en/products/search?q=${encoded}`,
+    farnell: `https://uk.farnell.com/search?st=${encoded}`,
+    lcsc: `https://www.lcsc.com/search?q=${encoded}`,
+    octopart: `https://octopart.com/search?q=${encoded}`,
   };
 }
 
-// ─────────────────────────────────────────────────────────────
-// OPENAPI SPEC
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// MAIN search orchestrator
+// Priority: DigiKey → Mouser → local DB
+// ─────────────────────────────────────────────
+async function identifyManufacturer(orderCode) {
+  if (!orderCode || orderCode.trim().length < 2) {
+    return {
+      success: false,
+      error: "Invalid order code",
+      orderCode,
+    };
+  }
+
+  const cleanCode = orderCode.trim();
+  console.log(`[Search] ${cleanCode}`);
+
+  // Run live lookups in parallel
+  const [dkApi, mouseApi, dkScrape, mouScrape] = await Promise.allSettled([
+    searchDigiKeyAPI(cleanCode),
+    searchMouserAPI(cleanCode),
+    searchDigiKey(cleanCode),
+    searchMouser(cleanCode),
+  ]);
+
+  // Collect all live results
+  const liveResults = [
+    ...(dkApi.status === "fulfilled" && dkApi.value ? dkApi.value : []),
+    ...(mouseApi.status === "fulfilled" && mouseApi.value ? mouseApi.value : []),
+    ...(dkScrape.status === "fulfilled" && dkScrape.value ? dkScrape.value : []),
+    ...(mouScrape.status === "fulfilled" && mouScrape.value ? mouScrape.value : []),
+  ];
+
+  console.log(`[Results] Live hits: ${liveResults.length}`);
+
+  let primaryMfr = null;
+  let alternateMfrs = [];
+  let dataSource = "none";
+
+  if (liveResults.length > 0) {
+    const consolidated = consolidateResults(liveResults);
+    if (consolidated && consolidated.primary) {
+      primaryMfr = {
+        name: consolidated.primary.name,
+        mpn: consolidated.primary.mpn,
+        description: consolidated.primary.description,
+        sources: consolidated.primary.sources,
+        website: `https://www.google.com/search?q=${encodeURIComponent(consolidated.primary.name + " " + cleanCode)}`,
+      };
+      alternateMfrs = consolidated.alternates.map((a) => ({
+        name: a.name,
+        mpn: a.mpn,
+        description: a.description,
+        sources: a.sources,
+      }));
+      dataSource = "live";
+    }
+  }
+
+  // If live lookup returned nothing, fall back to local DB
+  if (!primaryMfr) {
+    console.log("[Fallback] Using local database");
+    const localMatches = localLookup(cleanCode);
+    if (localMatches && localMatches.length > 0) {
+      const first = localMatches[0];
+      primaryMfr = {
+        name: first.manufacturer,
+        shortCode: first.shortCode,
+        website: first.website,
+        categories: first.categories,
+        mpn: cleanCode,
+        description: "",
+        sources: ["local-db"],
+      };
+      alternateMfrs = localMatches.slice(1).map((m) => ({
+        name: m.manufacturer,
+        shortCode: m.shortCode,
+        website: m.website,
+        categories: m.categories,
+        mpn: cleanCode,
+      }));
+      dataSource = "local-db";
+    }
+  }
+
+  if (!primaryMfr) {
+    return {
+      success: false,
+      orderCode: cleanCode,
+      error: "Manufacturer not identified",
+      message:
+        "Could not identify manufacturer from live distributors or local database. Try the distributor links to check manually.",
+      distributorLinks: distributorLinks(cleanCode),
+      dataSource: "none",
+    };
+  }
+
+  return {
+    success: true,
+    orderCode: cleanCode,
+    dataSource,
+    primaryManufacturer: primaryMfr,
+    alternateManufacturers: alternateMfrs,
+    totalManufacturers: 1 + alternateMfrs.length,
+    distributorLinks: distributorLinks(cleanCode),
+    note:
+      dataSource === "live"
+        ? "Manufacturer identified from live DigiKey/Mouser data."
+        : "Manufacturer identified from local prefix database (live lookup returned no results).",
+  };
+}
+
+// ─────────────────────────────────────────────
+// OpenAPI spec
+// ─────────────────────────────────────────────
 const OPENAPI_SPEC = {
   openapi: "3.0.0",
   info: {
     title: "Electronic Parts Manufacturer API",
-    description: "Identifies manufacturer(s) from electronic component order codes. Covers 400+ manufacturers across all major categories.",
+    description:
+      "Identifies the manufacturer and alternate manufacturers from an electronic component order code by querying DigiKey and Mouser live, then falling back to a 600+ manufacturer local database.",
     version: "3.0.0",
   },
-  servers: [{ url: "https://parts-api-production.up.railway.app", description: "Production" }],
+  servers: [{ url: `http://localhost:${PORT}` }],
   paths: {
     "/search": {
       get: {
-        operationId: "identifyManufacturer",
-        summary: "Identify manufacturer(s) from an order code",
-        parameters: [{
-          name: "orderCode",
-          in: "query",
-          required: true,
-          description: "Electronic component order code or part number",
-          schema: { type: "string", example: "STM32F103C8T6" },
-        }],
-        responses: { 200: { description: "Manufacturer identification result" } },
+        operationId: "searchByOrderCode",
+        summary: "Identify manufacturer from order code",
+        description:
+          "Queries DigiKey and Mouser live for accurate manufacturer data, with local DB fallback.",
+        parameters: [
+          {
+            name: "orderCode",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "Electronic component order code or part number",
+          },
+        ],
+        responses: {
+          200: {
+            description: "Search result with manufacturer info",
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+        },
       },
       post: {
-        operationId: "identifyManufacturerPost",
-        summary: "Identify manufacturer(s) — POST",
+        operationId: "searchByOrderCodePost",
+        summary: "Identify manufacturer from order code (POST)",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["orderCode"], properties: { orderCode: { type: "string" } } } } },
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { orderCode: { type: "string" } },
+                required: ["orderCode"],
+              },
+            },
+          },
         },
-        responses: { 200: { description: "OK" } },
+        responses: {
+          200: { description: "Search result" },
+        },
       },
     },
-    "/manufacturers": {
-      get: { operationId: "listManufacturers", summary: "List all manufacturers", responses: { 200: { description: "Full list" } } },
-    },
     "/health": {
-      get: { operationId: "healthCheck", summary: "Health check", responses: { 200: { description: "ok" } } },
+      get: {
+        operationId: "healthCheck",
+        summary: "Health check",
+        responses: { 200: { description: "OK" } },
+      },
     },
   },
 };
 
-// ─────────────────────────────────────────────────────────────
-// HTTP SERVER
-// ─────────────────────────────────────────────────────────────
-function json(res, status, data) {
-  const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  });
-  res.end(body);
-}
+// ─────────────────────────────────────────────
+// HTTP Server
+// ─────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  setCORS(res);
+  res.setHeader("Content-Type", "application/json");
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    req.on("data", c => buf += c);
-    req.on("end", () => { try { resolve(buf ? JSON.parse(buf) : {}); } catch { reject(); } });
-    req.on("error", reject);
-  });
-}
-
-http.createServer(async (req, res) => {
-  const { pathname, query } = url.parse(req.url, true);
-  const method = req.method;
-
-  if (method === "OPTIONS") {
-    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
-    return res.end();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
   }
 
-  if (pathname === "/health")
-    return json(res, 200, { status: "ok", timestamp: new Date().toISOString(), manufacturerCount: Object.keys(MANUFACTURERS).length });
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname;
 
-  if (pathname === "/openapi.json")
-    return json(res, 200, OPENAPI_SPEC);
-
-  if (pathname === "/manufacturers") {
-    const list = Object.values(MANUFACTURERS).map(
-      ({ name, shortCode, website, categories, prefixes }) =>
-        ({ name, shortCode, website, categories, prefixes })
-    );
-    return json(res, 200, { success: true, count: list.length, manufacturers: list });
+  if (path === "/health" && req.method === "GET") {
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: "ok", version: "3.0.0", time: new Date().toISOString() }));
+    return;
   }
 
-  if (pathname === "/search") {
-    let orderCode = "";
-    if (method === "GET") {
-      orderCode = (query.orderCode || query.order_code || "").trim();
-    } else if (method === "POST") {
+  if (path === "/openapi.json" && req.method === "GET") {
+    res.writeHead(200);
+    res.end(JSON.stringify(OPENAPI_SPEC, null, 2));
+    return;
+  }
+
+  if (path === "/search") {
+    let orderCode = null;
+
+    if (req.method === "GET") {
+      orderCode = parsedUrl.query.orderCode || parsedUrl.query.ordercode;
+    } else if (req.method === "POST") {
       try {
-        const body = await readBody(req);
-        orderCode = (body.orderCode || body.order_code || "").trim();
-      } catch {
-        return json(res, 400, { success: false, message: "Invalid JSON body." });
+        const body = await new Promise((resolve, reject) => {
+          let data = "";
+          req.on("data", (c) => (data += c));
+          req.on("end", () => resolve(data));
+          req.on("error", reject);
+        });
+        const parsed = JSON.parse(body);
+        orderCode = parsed.orderCode || parsed.ordercode;
+      } catch (_) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        return;
       }
-    } else {
-      return json(res, 405, { success: false, message: "Method not allowed." });
     }
 
-    if (!orderCode)
-      return json(res, 400, { success: false, message: "Missing orderCode.", example: "GET /search?orderCode=STM32F103C8T6" });
-    if (orderCode.length > 100)
-      return json(res, 400, { success: false, message: "orderCode too long (max 100 chars)." });
+    if (!orderCode) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "Missing orderCode parameter" }));
+      return;
+    }
 
-    const matches = detectManufacturers(orderCode);
-    return json(res, 200, formatResult(orderCode, matches));
+    try {
+      const result = await identifyManufacturer(orderCode);
+      res.writeHead(200);
+      res.end(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error("Search error:", err);
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: "Internal error", message: err.message }));
+    }
+    return;
   }
 
-  json(res, 404, {
-    success: false,
-    message: "Not found.",
-    endpoints: [
-      "GET  /search?orderCode=XXXX",
-      "POST /search  { orderCode: 'XXXX' }",
-      "GET  /manufacturers",
-      "GET  /openapi.json",
-      "GET  /health",
-    ],
-  });
+  res.writeHead(404);
+  res.end(JSON.stringify({ error: "Not found", availableEndpoints: ["/search?orderCode=STM32F103C8T6", "/health", "/openapi.json"] }));
+});
 
-}).listen(process.env.PORT || 3000, () => {
-  const port = process.env.PORT || 3000;
-  const count = Object.keys(MANUFACTURERS).length;
-  console.log(`Parts API → http://localhost:${port}`);
-  console.log(`Manufacturers in DB: ${count}`);
-  console.log(`Test → http://localhost:${port}/search?orderCode=STM32F103C8T6`);
+server.listen(PORT, () => {
+  console.log(`\n Electronic Parts API v3.0 running on port ${PORT}`);
+  console.log(` Search:    http://localhost:${PORT}/search?orderCode=STM32F103C8T6`);
+  console.log(` Health:    http://localhost:${PORT}/health`);
+  console.log(` OpenAPI:   http://localhost:${PORT}/openapi.json\n`);
+  console.log(" Live lookups: DigiKey → Mouser → Local DB (600+ manufacturers)\n");
 });
