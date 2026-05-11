@@ -1,15 +1,22 @@
 /**
  * Electronic Parts Manufacturer Search API
- * Comprehensive database — 400+ manufacturers
- * Zero dependencies — just Node.js built-ins
+ * Cloudflare Worker — 400+ manufacturers + DigiKey + Mouser live data
  *
- * Run:  node parts-api.js
- * Port: 3000  (override with PORT env var)
+ * Deploy:
+ *   1. Go to workers.cloudflare.com
+ *   2. Create a new Worker
+ *   3. Paste this entire file
+ *   4. Click Deploy
+ *
+ * Set these as Worker Environment Variables (Settings → Variables):
+ *   DIGIKEY_CLIENT_ID
+ *   DIGIKEY_CLIENT_SECRET
+ *   MOUSER_API_KEY
  */
 
-const http = require("http");
-const url  = require("url");
-
+// ─────────────────────────────────────────────────────────────
+// MANUFACTURER DATABASE
+// ─────────────────────────────────────────────────────────────
 const MANUFACTURERS = {
 
   // ── 3M ─────────────────────────────────────────────────────
@@ -1749,264 +1756,6 @@ const MANUFACTURERS = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// API KEYS  (set these as Railway environment variables)
-// ─────────────────────────────────────────────────────────────
-const DIGIKEY_CLIENT_ID     = process.env.DIGIKEY_CLIENT_ID     || "EcCzhW3OfDAfYDAp1WqnDTHapGSsbddZGVPBbJAJeDgWZlpA";
-const DIGIKEY_CLIENT_SECRET = process.env.DIGIKEY_CLIENT_SECRET || "cHKuaRSEcoGd4f8ZaoFaM7eqPLqiubZFGJGGGtvLdJHd6wN9dQmcaqbkI3JHE3tJ";
-const MOUSER_API_KEY        = process.env.MOUSER_API_KEY        || "4572a805-0ad7-4f75-b58b-ccbd691a3cf4";
-
-// ─────────────────────────────────────────────────────────────
-// DIGIKEY TOKEN CACHE
-// ─────────────────────────────────────────────────────────────
-let digikeyToken = null;
-let digikeyTokenExpiry = 0;
-
-async function getDigikeyToken() {
-  if (digikeyToken && Date.now() < digikeyTokenExpiry) return digikeyToken;
-
-  const body = new URLSearchParams({
-    client_id:     DIGIKEY_CLIENT_ID,
-    client_secret: DIGIKEY_CLIENT_SECRET,
-    grant_type:    "client_credentials",
-  }).toString();
-
-  const res = await httpRequest("https://api.digikey.com/v1/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-
-  if (!res.ok) throw new Error("DigiKey auth failed: " + res.text);
-  const data = JSON.parse(res.text);
-  digikeyToken = data.access_token;
-  digikeyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return digikeyToken;
-}
-
-// ─────────────────────────────────────────────────────────────
-// HTTP HELPER (no external deps)
-// ─────────────────────────────────────────────────────────────
-function httpRequest(targetUrl, options = {}) {
-  return new Promise((resolve, reject) => {
-    const https = require("https");
-    const http2 = require("http");
-    const parsed = new URL(targetUrl);
-    const isHttps = parsed.protocol === "https:";
-    const lib = isHttps ? https : http2;
-
-    const reqOptions = {
-      hostname: parsed.hostname,
-      port: parsed.port || (isHttps ? 443 : 80),
-      path: parsed.pathname + parsed.search,
-      method: options.method || "GET",
-      headers: options.headers || {},
-    };
-
-    const req = lib.request(reqOptions, (res) => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: data }));
-    });
-
-    req.on("error", reject);
-    if (options.body) req.write(options.body);
-    req.end();
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
-// DIGIKEY SEARCH
-// ─────────────────────────────────────────────────────────────
-async function searchDigikey(partNumber) {
-  try {
-    const token = await getDigikeyToken();
-    const encoded = encodeURIComponent(partNumber);
-    const res = await httpRequest(
-      `https://api.digikey.com/products/v4/search/${encoded}/productdetails`,
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "X-DIGIKEY-Client-Id": DIGIKEY_CLIENT_ID,
-          "X-DIGIKEY-Locale-Site": "US",
-          "X-DIGIKEY-Locale-Language": "en",
-          "X-DIGIKEY-Locale-Currency": "USD",
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    if (!res.ok) {
-      // Try keyword search as fallback
-      const searchBody = JSON.stringify({
-        Keywords: partNumber,
-        RecordCount: 5,
-        RecordStartPosition: 0,
-        Filters: {},
-        Sort: { SortParameter: "None" },
-        RequestedQuantity: 1,
-      });
-
-      const searchRes = await httpRequest(
-        "https://api.digikey.com/products/v4/search/keyword",
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${token}`,
-            "X-DIGIKEY-Client-Id": DIGIKEY_CLIENT_ID,
-            "X-DIGIKEY-Locale-Site": "US",
-            "X-DIGIKEY-Locale-Language": "en",
-            "X-DIGIKEY-Locale-Currency": "USD",
-            "Content-Type": "application/json",
-          },
-          body: searchBody,
-        }
-      );
-
-      if (!searchRes.ok) return null;
-      const searchData = JSON.parse(searchRes.text);
-      const products = searchData.Products || [];
-      if (!products.length) return null;
-
-      return products.slice(0, 5).map(p => ({
-        source: "DigiKey",
-        orderablePartNumber: p.ManufacturerProductNumber || p.DigiKeyPartNumber,
-        digikeyPartNumber: p.DigiKeyPartNumber,
-        manufacturer: p.Manufacturer?.Name || "Unknown",
-        description: p.ProductDescription || "",
-        status: normalizeStatus(p.ProductStatus),
-        stock: p.QuantityAvailable ?? null,
-        minQty: p.MinimumOrderQuantity ?? null,
-        unitPrice: extractDigikeyPrice(p.UnitPrice),
-        currency: "USD",
-        datasheet: p.PrimaryDatasheet || null,
-        productUrl: p.ProductUrl || `https://www.digikey.com/en/products/detail/${encodeURIComponent(p.DigiKeyPartNumber || "")}`,
-        rohs: p.RoHSStatus || null,
-        packageType: p.PackageType?.Name || null,
-      }));
-    }
-
-    const data = JSON.parse(res.text);
-    const p = data.Product;
-    if (!p) return null;
-
-    return [{
-      source: "DigiKey",
-      orderablePartNumber: p.ManufacturerProductNumber || p.DigiKeyPartNumber,
-      digikeyPartNumber: p.DigiKeyPartNumber,
-      manufacturer: p.Manufacturer?.Name || "Unknown",
-      description: p.ProductDescription || "",
-      status: normalizeStatus(p.ProductStatus),
-      stock: p.QuantityAvailable ?? null,
-      minQty: p.MinimumOrderQuantity ?? null,
-      unitPrice: extractDigikeyPrice(p.UnitPrice),
-      currency: "USD",
-      datasheet: p.PrimaryDatasheet || null,
-      productUrl: p.ProductUrl || null,
-      rohs: p.RoHSStatus || null,
-      packageType: p.PackageType?.Name || null,
-    }];
-  } catch (e) {
-    console.error("DigiKey error:", e.message);
-    return null;
-  }
-}
-
-function extractDigikeyPrice(unitPrice) {
-  if (!unitPrice) return null;
-  if (typeof unitPrice === "number") return unitPrice;
-  return null;
-}
-
-// ─────────────────────────────────────────────────────────────
-// MOUSER SEARCH
-// ─────────────────────────────────────────────────────────────
-async function searchMouser(partNumber) {
-  try {
-    const body = JSON.stringify({
-      SearchByPartRequest: {
-        mouserPartNumber: partNumber,
-        partSearchOptions: "BeginsWith",
-      },
-    });
-
-    const res = await httpRequest(
-      `https://api.mouser.com/api/v1/search/partnumber?apiKey=${MOUSER_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body,
-      }
-    );
-
-    if (!res.ok) return null;
-    const data = JSON.parse(res.text);
-    const parts = data.SearchResults?.Parts || [];
-    if (!parts.length) return null;
-
-    return parts.slice(0, 5).map(p => ({
-      source: "Mouser",
-      orderablePartNumber: p.ManufacturerPartNumber,
-      mouserPartNumber: p.MouserPartNumber,
-      manufacturer: p.Manufacturer || "Unknown",
-      description: p.Description || "",
-      status: normalizeMouserStatus(p.LifecycleStatus, p.Availability),
-      stock: parseMouserStock(p.Availability),
-      minQty: parseInt(p.Min) || null,
-      unitPrice: parseMouserPrice(p.PriceBreaks),
-      currency: "USD",
-      datasheet: p.DataSheetUrl || null,
-      productUrl: p.ProductDetailUrl
-        ? `https://www.mouser.com${p.ProductDetailUrl}`
-        : null,
-      rohs: p.ROHSStatus || null,
-      packageType: p.Category || null,
-    }));
-  } catch (e) {
-    console.error("Mouser error:", e.message);
-    return null;
-  }
-}
-
-function parseMouserStock(availability) {
-  if (!availability) return null;
-  const match = String(availability).replace(/,/g, "").match(/(\d+)/);
-  return match ? parseInt(match[1]) : 0;
-}
-
-function parseMouserPrice(priceBreaks) {
-  if (!priceBreaks || !priceBreaks.length) return null;
-  const first = priceBreaks[0];
-  if (!first || !first.Price) return null;
-  const price = parseFloat(String(first.Price).replace(/[^0-9.]/g, ""));
-  return isNaN(price) ? null : price;
-}
-
-// ─────────────────────────────────────────────────────────────
-// STATUS NORMALIZER
-// ─────────────────────────────────────────────────────────────
-function normalizeStatus(status) {
-  if (!status) return "Unknown";
-  const s = String(status).toLowerCase();
-  if (s.includes("active") || s.includes("in production")) return "Active";
-  if (s.includes("obsolete") || s.includes("discontinued")) return "Discontinued";
-  if (s.includes("last time") || s.includes("ltb")) return "Last Time Buy";
-  if (s.includes("not recommend") || s.includes("nrnd")) return "Not Recommended for New Designs";
-  if (s.includes("preview") || s.includes("pre-production")) return "Preview";
-  return status;
-}
-
-function normalizeMouserStatus(lifecycle, availability) {
-  if (lifecycle) return normalizeStatus(lifecycle);
-  if (!availability) return "Unknown";
-  const a = String(availability).toLowerCase();
-  if (a.includes("in stock") || a.match(/\d+/)) return "Active";
-  if (a.includes("obsolete")) return "Discontinued";
-  if (a.includes("last time")) return "Last Time Buy";
-  return "Check Availability";
-}
-
-// ─────────────────────────────────────────────────────────────
 // DETECTION LOGIC
 // ─────────────────────────────────────────────────────────────
 function detectManufacturers(orderCode) {
@@ -2030,12 +1779,215 @@ function detectManufacturers(orderCode) {
       seenNames.add(mfr.name);
     }
   }
-
   matches.sort((a, b) => b.score - a.score);
   return matches;
 }
 
-function formatResult(orderCode, matches, distributorData) {
+// ─────────────────────────────────────────────────────────────
+// DIGIKEY TOKEN CACHE (in-memory, resets per Worker instance)
+// ─────────────────────────────────────────────────────────────
+let digikeyToken = null;
+let digikeyTokenExpiry = 0;
+
+async function getDigikeyToken(clientId, clientSecret) {
+  if (digikeyToken && Date.now() < digikeyTokenExpiry) return digikeyToken;
+
+  const res = await fetch("https://api.digikey.com/v1/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "client_credentials",
+    }),
+  });
+
+  if (!res.ok) throw new Error("DigiKey auth failed");
+  const data = await res.json();
+  digikeyToken = data.access_token;
+  digikeyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  return digikeyToken;
+}
+
+// ─────────────────────────────────────────────────────────────
+// DIGIKEY SEARCH
+// ─────────────────────────────────────────────────────────────
+async function searchDigikey(partNumber, env) {
+  try {
+    const clientId = env.DIGIKEY_CLIENT_ID || "EcCzhW3OfDAfYDAp1WqnDTHapGSsbddZGVPBbJAJeDgWZlpA";
+    const clientSecret = env.DIGIKEY_CLIENT_SECRET || "cHKuaRSEcoGd4f8ZaoFaM7eqPLqiubZFGJGGGtvLdJHd6wN9dQmcaqbkI3JHE3tJ";
+    const token = await getDigikeyToken(clientId, clientSecret);
+
+    // Try direct product lookup first
+    const directRes = await fetch(
+      `https://api.digikey.com/products/v4/search/${encodeURIComponent(partNumber)}/productdetails`,
+      {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "X-DIGIKEY-Client-Id": clientId,
+          "X-DIGIKEY-Locale-Site": "US",
+          "X-DIGIKEY-Locale-Language": "en",
+          "X-DIGIKEY-Locale-Currency": "USD",
+        },
+      }
+    );
+
+    if (directRes.ok) {
+      const data = await directRes.json();
+      const p = data.Product;
+      if (p) {
+        return [{
+          source: "DigiKey",
+          orderablePartNumber: p.ManufacturerProductNumber || p.DigiKeyPartNumber,
+          digikeyPartNumber: p.DigiKeyPartNumber,
+          manufacturer: p.Manufacturer?.Name || "Unknown",
+          description: p.ProductDescription || "",
+          status: normalizeStatus(p.ProductStatus),
+          stock: p.QuantityAvailable ?? null,
+          minQty: p.MinimumOrderQuantity ?? null,
+          unitPrice: typeof p.UnitPrice === "number" ? p.UnitPrice : null,
+          currency: "USD",
+          datasheet: p.PrimaryDatasheet || null,
+          productUrl: p.ProductUrl || null,
+          rohs: p.RoHSStatus || null,
+          packageType: p.PackageType?.Name || null,
+        }];
+      }
+    }
+
+    // Fallback: keyword search
+    const searchRes = await fetch("https://api.digikey.com/products/v4/search/keyword", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "X-DIGIKEY-Client-Id": clientId,
+        "X-DIGIKEY-Locale-Site": "US",
+        "X-DIGIKEY-Locale-Language": "en",
+        "X-DIGIKEY-Locale-Currency": "USD",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        Keywords: partNumber,
+        RecordCount: 5,
+        RecordStartPosition: 0,
+        Filters: {},
+        Sort: { SortParameter: "None" },
+        RequestedQuantity: 1,
+      }),
+    });
+
+    if (!searchRes.ok) return null;
+    const searchData = await searchRes.json();
+    const products = searchData.Products || [];
+    if (!products.length) return null;
+
+    return products.slice(0, 5).map(p => ({
+      source: "DigiKey",
+      orderablePartNumber: p.ManufacturerProductNumber || p.DigiKeyPartNumber,
+      digikeyPartNumber: p.DigiKeyPartNumber,
+      manufacturer: p.Manufacturer?.Name || "Unknown",
+      description: p.ProductDescription || "",
+      status: normalizeStatus(p.ProductStatus),
+      stock: p.QuantityAvailable ?? null,
+      minQty: p.MinimumOrderQuantity ?? null,
+      unitPrice: typeof p.UnitPrice === "number" ? p.UnitPrice : null,
+      currency: "USD",
+      datasheet: p.PrimaryDatasheet || null,
+      productUrl: p.ProductUrl || null,
+      rohs: p.RoHSStatus || null,
+      packageType: p.PackageType?.Name || null,
+    }));
+  } catch (e) {
+    console.error("DigiKey error:", e.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MOUSER SEARCH
+// ─────────────────────────────────────────────────────────────
+async function searchMouser(partNumber, env) {
+  try {
+    const apiKey = env.MOUSER_API_KEY || "4572a805-0ad7-4f75-b58b-ccbd691a3cf4";
+
+    const res = await fetch(
+      `https://api.mouser.com/api/v1/search/partnumber?apiKey=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({
+          SearchByPartRequest: {
+            mouserPartNumber: partNumber,
+            partSearchOptions: "BeginsWith",
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    const parts = data.SearchResults?.Parts || [];
+    if (!parts.length) return null;
+
+    return parts.slice(0, 5).map(p => ({
+      source: "Mouser",
+      orderablePartNumber: p.ManufacturerPartNumber,
+      mouserPartNumber: p.MouserPartNumber,
+      manufacturer: p.Manufacturer || "Unknown",
+      description: p.Description || "",
+      status: normalizeMouserStatus(p.LifecycleStatus, p.Availability),
+      stock: parseMouserStock(p.Availability),
+      minQty: parseInt(p.Min) || null,
+      unitPrice: parseMouserPrice(p.PriceBreaks),
+      currency: "USD",
+      datasheet: p.DataSheetUrl || null,
+      productUrl: p.ProductDetailUrl ? `https://www.mouser.com${p.ProductDetailUrl}` : null,
+      rohs: p.ROHSStatus || null,
+      packageType: p.Category || null,
+    }));
+  } catch (e) {
+    console.error("Mouser error:", e.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────
+function parseMouserStock(availability) {
+  if (!availability) return null;
+  const match = String(availability).replace(/,/g, "").match(/(\d+)/);
+  return match ? parseInt(match[1]) : 0;
+}
+
+function parseMouserPrice(priceBreaks) {
+  if (!priceBreaks || !priceBreaks.length) return null;
+  const price = parseFloat(String(priceBreaks[0]?.Price || "").replace(/[^0-9.]/g, ""));
+  return isNaN(price) ? null : price;
+}
+
+function normalizeStatus(status) {
+  if (!status) return "Unknown";
+  const s = String(status).toLowerCase();
+  if (s.includes("active") || s.includes("in production")) return "Active";
+  if (s.includes("obsolete") || s.includes("discontinued")) return "Discontinued";
+  if (s.includes("last time") || s.includes("ltb")) return "Last Time Buy";
+  if (s.includes("not recommend") || s.includes("nrnd")) return "Not Recommended for New Designs";
+  if (s.includes("preview") || s.includes("pre-production")) return "Preview";
+  return status;
+}
+
+function normalizeMouserStatus(lifecycle, availability) {
+  if (lifecycle) return normalizeStatus(lifecycle);
+  if (!availability) return "Unknown";
+  const a = String(availability).toLowerCase();
+  if (a.includes("in stock") || a.match(/\d+/)) return "Active";
+  if (a.includes("obsolete")) return "Discontinued";
+  if (a.includes("last time")) return "Last Time Buy";
+  return "Check Availability";
+}
+
+function buildResult(orderCode, matches, distributorData) {
   const fmt = ({ name, shortCode, website, categories, reason, note }) =>
     ({ name, shortCode, website, categories, matchReason: reason, ...(note ? { note } : {}) });
 
@@ -2054,14 +2006,11 @@ function formatResult(orderCode, matches, distributorData) {
       farnell:       `https://www.farnell.com/search?st=${encodeURIComponent(orderCode)}`,
       rs_components: `https://uk.rs-online.com/web/c/?searchTerm=${encodeURIComponent(orderCode)}`,
     },
-    liveData: distributorData || null,
+    liveData: distributorData,
   };
 
   if (distributorData) {
-    const allParts = [
-      ...(distributorData.digikey || []),
-      ...(distributorData.mouser  || []),
-    ];
+    const allParts = [...(distributorData.digikey || []), ...(distributorData.mouser || [])];
     const statuses = [...new Set(allParts.map(p => p.status).filter(Boolean))];
     const bestStatus = statuses.includes("Active") ? "Active"
       : statuses.includes("Last Time Buy") ? "Last Time Buy"
@@ -2070,6 +2019,7 @@ function formatResult(orderCode, matches, distributorData) {
     const totalStock = allParts.reduce((sum, p) => sum + (p.stock || 0), 0);
     const prices = allParts.map(p => p.unitPrice).filter(p => p != null);
     const minPrice = prices.length ? Math.min(...prices) : null;
+
     result.summary = {
       status: bestStatus,
       statusIndicator: bestStatus === "Active" ? "🟢"
@@ -2081,151 +2031,118 @@ function formatResult(orderCode, matches, distributorData) {
       sourcesChecked: ["DigiKey", "Mouser"],
     };
   }
+
   return result;
 }
 
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
-// OPENAPI SPEC
+// CLOUDFLARE WORKER ENTRY POINT
 // ─────────────────────────────────────────────────────────────
-const OPENAPI_SPEC = {
-  openapi: "3.0.0",
-  info: {
-    title: "Electronic Parts Manufacturer API",
-    description: "Identifies manufacturer(s) from electronic component order codes. Covers 400+ manufacturers across all major categories.",
-    version: "3.0.0",
-  },
-  servers: [{ url: "https://parts-api-production.up.railway.app", description: "Production" }],
-  paths: {
-    "/search": {
-      get: {
-        operationId: "identifyManufacturer",
-        summary: "Identify manufacturer(s) from an order code",
-        parameters: [{
-          name: "orderCode",
-          in: "query",
-          required: true,
-          description: "Electronic component order code or part number",
-          schema: { type: "string", example: "STM32F103C8T6" },
-        }],
-        responses: { 200: { description: "Manufacturer identification result" } },
-      },
-      post: {
-        operationId: "identifyManufacturerPost",
-        summary: "Identify manufacturer(s) — POST",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["orderCode"], properties: { orderCode: { type: "string" } } } } },
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    const method = request.method;
+
+    // CORS preflight
+    if (method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
         },
-        responses: { 200: { description: "OK" } },
-      },
-    },
-    "/manufacturers": {
-      get: { operationId: "listManufacturers", summary: "List all manufacturers", responses: { 200: { description: "Full list" } } },
-    },
-    "/health": {
-      get: { operationId: "healthCheck", summary: "Health check", responses: { 200: { description: "ok" } } },
-    },
-  },
-};
-
-// ─────────────────────────────────────────────────────────────
-// HTTP SERVER
-// ─────────────────────────────────────────────────────────────
-function json(res, status, data) {
-  const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  });
-  res.end(body);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    req.on("data", c => buf += c);
-    req.on("end", () => { try { resolve(buf ? JSON.parse(buf) : {}); } catch { reject(); } });
-    req.on("error", reject);
-  });
-}
-
-http.createServer(async (req, res) => {
-  const { pathname, query } = url.parse(req.url, true);
-  const method = req.method;
-
-  if (method === "OPTIONS") {
-    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
-    return res.end();
-  }
-
-  if (pathname === "/health")
-    return json(res, 200, { status: "ok", timestamp: new Date().toISOString(), manufacturerCount: Object.keys(MANUFACTURERS).length });
-
-  if (pathname === "/openapi.json")
-    return json(res, 200, OPENAPI_SPEC);
-
-  if (pathname === "/manufacturers") {
-    const list = Object.values(MANUFACTURERS).map(
-      ({ name, shortCode, website, categories, prefixes }) =>
-        ({ name, shortCode, website, categories, prefixes })
-    );
-    return json(res, 200, { success: true, count: list.length, manufacturers: list });
-  }
-
-  if (pathname === "/search") {
-    let orderCode = "";
-    if (method === "GET") {
-      orderCode = (query.orderCode || query.order_code || "").trim();
-    } else if (method === "POST") {
-      try {
-        const body = await readBody(req);
-        orderCode = (body.orderCode || body.order_code || "").trim();
-      } catch {
-        return json(res, 400, { success: false, message: "Invalid JSON body." });
-      }
-    } else {
-      return json(res, 405, { success: false, message: "Method not allowed." });
+      });
     }
 
-    if (!orderCode)
-      return json(res, 400, { success: false, message: "Missing orderCode.", example: "GET /search?orderCode=STM32F103C8T6" });
-    if (orderCode.length > 100)
-      return json(res, 400, { success: false, message: "orderCode too long (max 100 chars)." });
+    // Health check
+    if (pathname === "/health") {
+      return jsonResponse({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        manufacturerCount: Object.keys(MANUFACTURERS).length,
+        runtime: "Cloudflare Workers",
+      });
+    }
 
-    const matches = detectManufacturers(orderCode);
+    // Manufacturers list
+    if (pathname === "/manufacturers") {
+      const list = Object.values(MANUFACTURERS).map(
+        ({ name, shortCode, website, categories, prefixes }) =>
+          ({ name, shortCode, website, categories, prefixes })
+      );
+      return jsonResponse({ success: true, count: list.length, manufacturers: list });
+    }
 
-    // Fetch live data from DigiKey + Mouser in parallel
-    const [digikeyResults, mouserResults] = await Promise.allSettled([
-      searchDigikey(orderCode),
-      searchMouser(orderCode),
-    ]);
+    // Search endpoint
+    if (pathname === "/search") {
+      let orderCode = "";
 
-    const distributorData = {
-      digikey: digikeyResults.status === "fulfilled" ? digikeyResults.value : null,
-      mouser:  mouserResults.status  === "fulfilled" ? mouserResults.value  : null,
-    };
+      if (method === "GET") {
+        orderCode = (url.searchParams.get("orderCode") || url.searchParams.get("order_code") || "").trim();
+      } else if (method === "POST") {
+        try {
+          const body = await request.json();
+          orderCode = (body.orderCode || body.order_code || "").trim();
+        } catch {
+          return jsonResponse({ success: false, message: "Invalid JSON body." }, 400);
+        }
+      } else {
+        return jsonResponse({ success: false, message: "Method not allowed." }, 405);
+      }
 
-    return json(res, 200, formatResult(orderCode, matches, distributorData));
-  }
+      if (!orderCode) {
+        return jsonResponse({
+          success: false,
+          message: "Missing orderCode.",
+          example: "GET /search?orderCode=STM32F103C8T6",
+        }, 400);
+      }
 
-  json(res, 404, {
-    success: false,
-    message: "Not found.",
-    endpoints: [
-      "GET  /search?orderCode=XXXX",
-      "POST /search  { orderCode: 'XXXX' }",
-      "GET  /manufacturers",
-      "GET  /openapi.json",
-      "GET  /health",
-    ],
-  });
+      if (orderCode.length > 100) {
+        return jsonResponse({ success: false, message: "orderCode too long (max 100 chars)." }, 400);
+      }
 
-}).listen(process.env.PORT || 3000, () => {
-  const port = process.env.PORT || 3000;
-  const count = Object.keys(MANUFACTURERS).length;
-  console.log(`Parts API → http://localhost:${port}`);
-  console.log(`Manufacturers in DB: ${count}`);
-  console.log(`Test → http://localhost:${port}/search?orderCode=STM32F103C8T6`);
-});
+      // Detect manufacturer from local DB
+      const matches = detectManufacturers(orderCode);
+
+      // Fetch live data from DigiKey + Mouser in parallel
+      const [digikeyResult, mouserResult] = await Promise.allSettled([
+        searchDigikey(orderCode, env),
+        searchMouser(orderCode, env),
+      ]);
+
+      const distributorData = {
+        digikey: digikeyResult.status === "fulfilled" ? digikeyResult.value : null,
+        mouser:  mouserResult.status  === "fulfilled" ? mouserResult.value  : null,
+      };
+
+      return jsonResponse(buildResult(orderCode, matches, distributorData));
+    }
+
+    // 404
+    return jsonResponse({
+      success: false,
+      message: "Not found.",
+      endpoints: [
+        "GET  /search?orderCode=XXXX",
+        "POST /search  { orderCode: \'XXXX\' }",
+        "GET  /manufacturers",
+        "GET  /health",
+      ],
+    }, 404);
+  },
+};
